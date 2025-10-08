@@ -9,3 +9,4 @@ linked_list_allocator = "0.10.5"
 riscv-rt = { version = "0.16.0", features = ["s-mode"] }
 sbi = "0.3.0"
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+riscv = "0.15"

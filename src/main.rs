@@ -15,6 +15,7 @@ mod utils;
 
 mod fs;
 mod heap;
+mod interrupts;
 mod virtio;
 
 pub const ENTER: u8 = 13;
@@ -56,7 +57,7 @@ pub fn shell() -> ! {
                 command.push(c as char);
                 print!("{}", c as char);
             }
-            None => {}
+            None => crate::interrupts::wait_for_event(),
         }
     }
 }
@@ -285,15 +286,29 @@ fn normalize_path(cwd: &str, input: &str) -> String {
 
 #[entry]
 fn main(a0: usize) -> ! {
+    if a0 != 0 {
+        idle_loop();
+    }
+
     println!("Hello world from hart {}!\n", a0);
 
     unsafe {
         heap::init_kernel_heap();
     }
 
+    interrupts::init();
+
     if let Err(err) = crate::fs::init() {
         println!("failed to initialize filesystem: {}", err);
     }
 
     shell()
+}
+
+fn idle_loop() -> ! {
+    loop {
+        unsafe {
+            riscv::asm::wfi();
+        }
+    }
 }

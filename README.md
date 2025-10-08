@@ -7,10 +7,10 @@ Writing Xv6 in Rust.
 Following https://blog.henrygressmann.de/rust-os/2-shell/. Some changes
 including swapping out the allocator for `linked_list_allocator`.
 
-## Bugs
+## Notes
 
-- multiple CPUs spinning to 100% on start. Need to use `wfi` somehow in
-  the main loop?
+- Secondary harts now use `wfi` to idle instead of busy spinning, so
+  only the primary hart remains active while waiting for input.
 
 ## Initializing the file system
 
