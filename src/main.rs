@@ -3,7 +3,7 @@
 #![feature(allocator_api)]
 #![allow(unused)]
 
-extern crate alloc; // new
+extern crate alloc;
 extern crate riscv_rt;
 
 use core::arch::asm;
@@ -34,7 +34,7 @@ pub fn shell() -> ! {
             Some(BACKSPACE) => {
                 if !command.is_empty() {
                     command.pop();
-                    print!("{}", BACKSPACE as char)
+                    print!("\u{8}")
                 }
             }
             Some(c) => {
@@ -59,6 +59,10 @@ fn process_command(command: &str) {
         },
         "breakpoint" => {
             unsafe { asm!("ebreak") };
+        }
+        c if c.starts_with("echo") => {
+            let output: Vec<_> = c.split_ascii_whitespace().skip(1).collect();
+            println!("{}", output.join(" "));
         }
         "" => {}
         _ => {
