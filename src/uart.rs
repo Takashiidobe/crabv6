@@ -42,13 +42,17 @@ pub fn write_byte(byte: u8) {
     write_reg(REG_THR, byte);
 }
 
-pub fn write_str(s: &str) {
-    for byte in s.bytes() {
+pub fn write_bytes(bytes: &[u8]) {
+    for &byte in bytes {
         if byte == b'\n' {
             write_byte(b'\r');
         }
         write_byte(byte);
     }
+}
+
+pub fn write_str(s: &str) {
+    write_bytes(s.as_bytes());
 }
 
 pub fn read_byte_nonblocking() -> Option<u8> {

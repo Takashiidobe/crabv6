@@ -27,6 +27,9 @@ pub enum FsError {
     InvalidPath,
     NotADirectory,
     AlreadyExists,
+    DirectoryNotEmpty,
+    IsDirectory,
+    IsFile,
 }
 
 impl fmt::Display for FsError {
@@ -55,6 +58,9 @@ impl fmt::Display for FsError {
             FsError::InvalidPath => "invalid path",
             FsError::NotADirectory => "not a directory",
             FsError::AlreadyExists => "entry already exists",
+            FsError::DirectoryNotEmpty => "directory not empty",
+            FsError::IsDirectory => "expected file but found directory",
+            FsError::IsFile => "expected directory but found file",
         };
         f.write_str(message)
     }
@@ -451,6 +457,103 @@ impl<D: BlockDevice> TinyFs<D> {
 
         self.persist_directory_chain(&mut chain)
     }
+
+    fn create_file(&mut self, path: &str) -> Result<(), FsError> {
+        let components = self.split_path(path)?;
+        if components.is_empty() {
+            return Err(FsError::InvalidPath);
+        }
+        let (dirs, leaf) = components.split_at(components.len() - 1);
+        let file_name = leaf[0];
+        if file_name.is_empty() || file_name.len() > NAME_LEN {
+            return Err(FsError::NameTooLong);
+        }
+
+        let mut chain = self.load_directory_chain(dirs)?;
+        let parent_is_root = chain.len() == 1;
+        let parent_entries = chain.last_mut().expect("chain non-empty");
+
+        if parent_entries
+            .entries
+            .iter()
+            .any(|entry| entry.name == file_name)
+        {
+            return Err(FsError::AlreadyExists);
+        }
+
+        if parent_is_root && parent_entries.entries.len() >= MAX_FILES {
+            return Err(FsError::DirectoryFull);
+        }
+
+        parent_entries.entries.push(FileEntry {
+            name: String::from(file_name),
+            start_block: 0,
+            length: 0,
+            kind: EntryType::File,
+        });
+
+        self.persist_directory_chain(&mut chain)
+    }
+
+    fn remove_file(&mut self, path: &str) -> Result<(), FsError> {
+        let components = self.split_path(path)?;
+        if components.is_empty() {
+            return Err(FsError::InvalidPath);
+        }
+        let (dirs, leaf) = components.split_at(components.len() - 1);
+        let file_name = leaf[0];
+
+        let mut chain = self.load_directory_chain(dirs)?;
+        let parent_entries = chain.last_mut().expect("chain non-empty");
+
+        let Some(idx) = parent_entries
+            .entries
+            .iter()
+            .position(|entry| entry.name == file_name)
+        else {
+            return Err(FsError::NotFound);
+        };
+
+        if parent_entries.entries[idx].kind != EntryType::File {
+            return Err(FsError::IsDirectory);
+        }
+
+        parent_entries.entries.remove(idx);
+        self.persist_directory_chain(&mut chain)
+    }
+
+    fn remove_directory(&mut self, path: &str) -> Result<(), FsError> {
+        let components = self.split_path(path)?;
+        if components.is_empty() {
+            return Err(FsError::InvalidPath);
+        }
+        let (dirs, leaf) = components.split_at(components.len() - 1);
+        let dir_name = leaf[0];
+
+        let mut chain = self.load_directory_chain(dirs)?;
+        let parent_entries = chain.last_mut().expect("chain non-empty");
+
+        let Some(idx) = parent_entries
+            .entries
+            .iter()
+            .position(|entry| entry.name == dir_name)
+        else {
+            return Err(FsError::NotFound);
+        };
+
+        if parent_entries.entries[idx].kind != EntryType::Directory {
+            return Err(FsError::IsFile);
+        }
+
+        let entry = parent_entries.entries[idx].clone();
+        let children = self.read_directory_entries(&entry)?;
+        if !children.is_empty() {
+            return Err(FsError::DirectoryNotEmpty);
+        }
+
+        parent_entries.entries.remove(idx);
+        self.persist_directory_chain(&mut chain)
+    }
 }
 
 struct LoadedDir {
@@ -495,6 +598,18 @@ pub fn mkdir(path: &str) -> Result<(), FsError> {
 
 pub fn ensure_directory(path: &str) -> Result<(), FsError> {
     with_fs(|fs| fs.ensure_directory_exists(path))
+}
+
+pub fn create_file(path: &str) -> Result<(), FsError> {
+    with_fs(|fs| fs.create_file(path))
+}
+
+pub fn remove_file(path: &str) -> Result<(), FsError> {
+    with_fs(|fs| fs.remove_file(path))
+}
+
+pub fn remove_directory(path: &str) -> Result<(), FsError> {
+    with_fs(|fs| fs.remove_directory(path))
 }
 
 pub fn format() -> Result<(), FsError> {

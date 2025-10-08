@@ -16,7 +16,9 @@ mod utils;
 mod fs;
 mod heap;
 mod interrupts;
+mod syscall;
 mod uart;
+pub mod user;
 mod virtio;
 
 pub const ENTER: u8 = 13;
@@ -91,6 +93,19 @@ fn process_command(command: &str, cwd: &mut String) {
         "breakpoint" => {
             unsafe { asm!("ebreak") };
         }
+        "syscalltest" => unsafe {
+            let msg = b"hello from syscall\n";
+            let mut ret: usize;
+            asm!(
+                "ecall",
+                in("a0") crate::syscall::SYS_WRITE,
+                in("a1") 1usize,
+                in("a2") msg.as_ptr(),
+                in("a3") msg.len(),
+                lateout("a0") ret,
+            );
+            println!("sys_write returned {}", ret as isize);
+        },
         c if c.starts_with("fs") => {
             handle_fs_command(c, cwd);
         }

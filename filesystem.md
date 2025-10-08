@@ -144,7 +144,8 @@ fresh blocks and leaks the old extents.
 ## Public interface
 
 `fs::init` brings up the VirtIO block device and mounts TinyFS once. All
-helpers (`list_files`, `write_file`, `read_file`, `mkdir`, `ensure_directory`, `format`) use
+helpers (`list_files`, `write_file`, `read_file`, `mkdir`, `create_file`, `remove_file`,
+`remove_directory`, `ensure_directory`, `format`) use
 `with_fs` to lock the global instance behind a `spin::Mutex`.
 
 - `list_files(Some("path/to/dir"))` returns names, appending `/` for
@@ -153,6 +154,11 @@ helpers (`list_files`, `write_file`, `read_file`, `mkdir`, `ensure_directory`, `
   allocating new blocks for the payload.
 - `mkdir("path/to/dir")` creates empty directories (they acquire blocks
   only when entries are added).
+- `create_file("path/to/file")` creates an empty file without writing
+  data.
+- `remove_file("path/to/file")` deletes the directory entry (and leaks
+  the old data blocks).
+- `remove_directory("path/to/dir")` removes empty directories.
 - `ensure_directory("path/to/dir")` validates a directory path without
   mutating the filesystem (used by the shell's `cd`).
 
