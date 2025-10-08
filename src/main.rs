@@ -16,6 +16,7 @@ mod utils;
 mod fs;
 mod heap;
 mod interrupts;
+mod uart;
 mod virtio;
 
 pub const ENTER: u8 = 13;
@@ -29,7 +30,7 @@ pub fn shell() -> ! {
     let mut command = String::new();
 
     loop {
-        match sbi::legacy::console_getchar() {
+        match crate::uart::read_byte_nonblocking() {
             Some(ENTER) => {
                 println!();
                 process_command(&command, &mut cwd);
@@ -53,9 +54,10 @@ pub fn shell() -> ! {
             Some(CTRL_L) => {
                 process_command("clear", &mut cwd);
             }
-            Some(c) => {
-                command.push(c as char);
-                print!("{}", c as char);
+            Some(byte) => {
+                let ch = byte as char;
+                command.push(ch);
+                print!("{}", ch);
             }
             None => crate::interrupts::wait_for_event(),
         }
@@ -290,13 +292,14 @@ fn main(a0: usize) -> ! {
         idle_loop();
     }
 
-    println!("Hello world from hart {}!\n", a0);
-
     unsafe {
         heap::init_kernel_heap();
     }
 
+    uart::init();
     interrupts::init();
+
+    println!("Hello world from hart {}!\n", a0);
 
     if let Err(err) = crate::fs::init() {
         println!("failed to initialize filesystem: {}", err);

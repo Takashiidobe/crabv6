@@ -1,7 +1,7 @@
+use sbi;
+
 pub fn print(t: &str) {
-    for c in t.chars() {
-        sbi::legacy::console_putchar(c.try_into().unwrap_or(b'?'))
-    }
+    crate::uart::write_str(t);
 }
 
 struct Writer {}

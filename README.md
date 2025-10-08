@@ -9,8 +9,9 @@ including swapping out the allocator for `linked_list_allocator`.
 
 ## Notes
 
-- Secondary harts now use `wfi` to idle instead of busy spinning, so
-  only the primary hart remains active while waiting for input.
+- Secondary harts now use `wfi` to idle instead of busy spinning, and
+  hart 0 sleeps until the UART raises a PLIC interrupt, eliminating the
+  constant 100% CPU load.
 
 ## Initializing the file system
 
