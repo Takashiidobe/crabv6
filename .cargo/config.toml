@@ -3,7 +3,18 @@ target = "riscv64gc-unknown-none-elf"
 
 
 [target.riscv64gc-unknown-none-elf]
-runner = "qemu-system-riscv64 -m 2G -machine virt -nographic -serial mon:stdio -kernel"
+runner = """
+qemu-system-riscv64 \
+	-m 2G \
+  -machine virt \
+	-nographic \
+	-serial \
+	mon:stdio \
+  -drive file=./disk.img,if=none,id=fsdisk,format=raw \
+	-device virtio-blk-device,drive=fsdisk,bus=virtio-mmio-bus.0 \
+	-global virtio-mmio.force-legacy=off \
+	-kernel
+"""
 
 rustflags = [
 	"-Clink-arg=-Tmemory.x",
