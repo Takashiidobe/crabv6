@@ -17,6 +17,8 @@ mod heap;
 
 pub const ENTER: u8 = 13;
 pub const BACKSPACE: u8 = 127;
+pub const CTRL_C: u8 = 3;
+pub const CTRL_L: u8 = 12;
 
 pub fn shell() -> ! {
     print!("> ");
@@ -34,8 +36,19 @@ pub fn shell() -> ! {
             Some(BACKSPACE) => {
                 if !command.is_empty() {
                     command.pop();
-                    print!("\u{8}")
+                    // move left
+                    print!("\x08");
+                    // clear last character
+                    print!(" ");
+                    // move cursor back one
+                    print!("\x1b[1D");
                 }
+            }
+            Some(CTRL_C) => {
+                process_command("exit");
+            }
+            Some(CTRL_L) => {
+                process_command("clear");
             }
             Some(c) => {
                 command.push(c as char);
@@ -46,14 +59,27 @@ pub fn shell() -> ! {
     }
 }
 
+fn clear_screen() {
+    print!("\x1b[2J\x1b[1;1H");
+}
+
+fn print_help_text() {
+    println!("available commands:");
+    println!("  help      print this help message  (alias: h, ?)");
+    println!("  shutdown  shutdown the machine     (alias: sd, exit)");
+}
+
 fn process_command(command: &str) {
     match command {
         "help" | "?" | "h" => {
-            println!("available commands:");
-            println!("  help      print this help message  (alias: h, ?)");
-            println!("  shutdown  shutdown the machine     (alias: sd, exit)");
+            print_help_text();
         }
         "shutdown" | "sd" | "exit" => utils::shutdown(),
+        "clear" => {
+            clear_screen();
+            print_help_text();
+            shell()
+        }
         "pagefault" => unsafe {
             core::ptr::read_volatile(0xdeadbeef as *mut u64);
         },
