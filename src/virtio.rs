@@ -119,7 +119,6 @@ pub mod block {
         }
     }
 
-    #[allow(dead_code)]
     enum RequestType {
         In = 0,
         Out = 1,

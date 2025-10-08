@@ -284,10 +284,7 @@ impl<D: BlockDevice> TinyFs<D> {
         Ok(components)
     }
 
-    fn load_directory_chain<'a>(
-        &mut self,
-        components: &[&'a str],
-    ) -> Result<Vec<LoadedDir>, FsError> {
+    fn load_directory_chain(&mut self, components: &[&str]) -> Result<Vec<LoadedDir>, FsError> {
         let mut chain = Vec::new();
         chain.push(LoadedDir {
             entries: self.root_entries.clone(),
@@ -320,7 +317,7 @@ impl<D: BlockDevice> TinyFs<D> {
         Ok(chain)
     }
 
-    fn persist_directory_chain(&mut self, chain: &mut Vec<LoadedDir>) -> Result<(), FsError> {
+    fn persist_directory_chain(&mut self, chain: &mut [LoadedDir]) -> Result<(), FsError> {
         for level in (1..chain.len()).rev() {
             let (parents, current) = chain.split_at_mut(level);
             let parent = &mut parents[level - 1];
@@ -392,10 +389,8 @@ impl<D: BlockDevice> TinyFs<D> {
             .iter()
             .position(|entry| entry.name == file_name);
 
-        if existing_index.is_none() {
-            if parent_is_root && parent_entries.entries.len() >= MAX_FILES {
-                return Err(FsError::DirectoryFull);
-            }
+        if existing_index.is_none() && parent_is_root && parent_entries.entries.len() >= MAX_FILES {
+            return Err(FsError::DirectoryFull);
         }
 
         let (start_block, length) = self.allocate_and_write(contents)?;
@@ -440,11 +435,7 @@ impl<D: BlockDevice> TinyFs<D> {
             .iter()
             .find(|entry| entry.name == dir_name)
         {
-            if entry.kind == EntryType::Directory {
-                return Err(FsError::AlreadyExists);
-            } else {
-                return Err(FsError::AlreadyExists);
-            }
+            return Err(FsError::AlreadyExists);
         }
 
         if parent_is_root && parent_entries.entries.len() >= MAX_FILES {
@@ -487,8 +478,7 @@ fn with_fs<T>(
 }
 
 pub fn list_files(path: Option<&str>) -> Result<Vec<String>, FsError> {
-    let path = path.unwrap_or("");
-    with_fs(|fs| fs.list_directory(path))
+    with_fs(|fs| fs.list_directory(path.unwrap_or("")))
 }
 
 pub fn read_file(path: &str) -> Result<Vec<u8>, FsError> {
@@ -501,6 +491,10 @@ pub fn write_file(path: &str, data: &[u8]) -> Result<(), FsError> {
 
 pub fn mkdir(path: &str) -> Result<(), FsError> {
     with_fs(|fs| fs.create_directory(path))
+}
+
+pub fn ensure_directory(path: &str) -> Result<(), FsError> {
+    with_fs(|fs| fs.ensure_directory_exists(path))
 }
 
 pub fn format() -> Result<(), FsError> {
@@ -543,4 +537,12 @@ fn deserialize_entry(chunk: &[u8]) -> Option<FileEntry> {
         length,
         kind,
     })
+}
+
+impl<D: BlockDevice> TinyFs<D> {
+    fn ensure_directory_exists(&mut self, path: &str) -> Result<(), FsError> {
+        let components = self.split_path(path)?;
+        self.load_directory_chain(&components)?;
+        Ok(())
+    }
 }

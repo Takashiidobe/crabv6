@@ -23,17 +23,17 @@ pub const CTRL_C: u8 = 3;
 pub const CTRL_L: u8 = 12;
 
 pub fn shell() -> ! {
-    print!("> ");
-
+    let mut cwd = String::new();
+    print_prompt(&cwd);
     let mut command = String::new();
 
     loop {
         match sbi::legacy::console_getchar() {
             Some(ENTER) => {
                 println!();
-                process_command(&command);
+                process_command(&command, &mut cwd);
                 command.clear();
-                print!("> ");
+                print_prompt(&cwd);
             }
             Some(BACKSPACE) => {
                 if !command.is_empty() {
@@ -47,10 +47,10 @@ pub fn shell() -> ! {
                 }
             }
             Some(CTRL_C) => {
-                process_command("exit");
+                process_command("exit", &mut cwd);
             }
             Some(CTRL_L) => {
-                process_command("clear");
+                process_command("clear", &mut cwd);
             }
             Some(c) => {
                 command.push(c as char);
@@ -72,7 +72,7 @@ fn print_help_text() {
     println!("  fs        simple filesystem tools   (try: fs ls)");
 }
 
-fn process_command(command: &str) {
+fn process_command(command: &str, cwd: &mut String) {
     match command {
         "help" | "?" | "h" => {
             print_help_text();
@@ -81,7 +81,6 @@ fn process_command(command: &str) {
         "clear" => {
             clear_screen();
             print_help_text();
-            shell()
         }
         "pagefault" => unsafe {
             core::ptr::read_volatile(0xdeadbeef as *mut u64);
@@ -90,7 +89,7 @@ fn process_command(command: &str) {
             unsafe { asm!("ebreak") };
         }
         c if c.starts_with("fs") => {
-            handle_fs_command(c);
+            handle_fs_command(c, cwd);
         }
         c if c.starts_with("echo") => {
             let output: Vec<_> = c.split_ascii_whitespace().skip(1).collect();
@@ -103,7 +102,7 @@ fn process_command(command: &str) {
     };
 }
 
-fn handle_fs_command(command: &str) {
+fn handle_fs_command(command: &str, cwd: &mut String) {
     let mut parts = command.split_ascii_whitespace();
     let Some(cmd) = parts.next() else {
         return;
@@ -125,8 +124,17 @@ fn handle_fs_command(command: &str) {
 
     match subcommand {
         "ls" => {
-            let path = parts.next();
-            match crate::fs::list_files(path) {
+            let target_path = if let Some(arg) = parts.next() {
+                normalize_path(cwd.as_str(), arg)
+            } else {
+                cwd.clone()
+            };
+            let path_opt = if target_path.is_empty() {
+                None
+            } else {
+                Some(target_path.as_str())
+            };
+            match crate::fs::list_files(path_opt) {
                 Ok(entries) => {
                     if entries.is_empty() {
                         println!("(empty)");
@@ -139,9 +147,30 @@ fn handle_fs_command(command: &str) {
                 Err(err) => println!("fs error: {}", err),
             }
         }
+        "cd" => {
+            let path_arg = parts.next().unwrap_or("/");
+            let target = normalize_path(cwd.as_str(), path_arg);
+            let fs_path = if target.is_empty() {
+                ""
+            } else {
+                target.as_str()
+            };
+            match crate::fs::ensure_directory(fs_path) {
+                Ok(()) => {
+                    *cwd = target;
+                }
+                Err(err) => println!("fs error: {}", err),
+            }
+        }
         "mkdir" => {
             if let Some(path) = parts.next() {
-                match crate::fs::mkdir(path) {
+                let target = normalize_path(cwd.as_str(), path);
+                let fs_path = if target.is_empty() {
+                    ""
+                } else {
+                    target.as_str()
+                };
+                match crate::fs::mkdir(fs_path) {
                     Ok(()) => println!("created directory {}", path),
                     Err(err) => println!("fs error: {}", err),
                 }
@@ -151,7 +180,13 @@ fn handle_fs_command(command: &str) {
         }
         "cat" => {
             if let Some(path) = parts.next() {
-                match crate::fs::read_file(path) {
+                let target = normalize_path(cwd.as_str(), path);
+                let fs_path = if target.is_empty() {
+                    ""
+                } else {
+                    target.as_str()
+                };
+                match crate::fs::read_file(fs_path) {
                     Ok(contents) => match String::from_utf8(contents) {
                         Ok(text) => println!("{}", text),
                         Err(_) => println!("fs error: file is not valid UTF-8"),
@@ -178,13 +213,22 @@ fn handle_fs_command(command: &str) {
                 println!("usage: fs write <path> <text>");
                 return;
             };
-            match crate::fs::write_file(path, data.as_bytes()) {
+            let target = normalize_path(cwd.as_str(), path);
+            let fs_path = if target.is_empty() {
+                ""
+            } else {
+                target.as_str()
+            };
+            match crate::fs::write_file(fs_path, data.as_bytes()) {
                 Ok(()) => println!("wrote {} bytes", data.len()),
                 Err(err) => println!("fs error: {}", err),
             }
         }
         "format" => match crate::fs::format() {
-            Ok(()) => println!("filesystem formatted"),
+            Ok(()) => {
+                *cwd = String::new();
+                println!("filesystem formatted");
+            }
             Err(err) => println!("fs error: {}", err),
         },
         _ => {
@@ -198,8 +242,45 @@ fn print_fs_usage() {
     println!("  fs ls [path]");
     println!("  fs cat <path>");
     println!("  fs write <path> <text>");
+    println!("  fs cd <path>");
     println!("  fs mkdir <path>");
     println!("  fs format");
+}
+
+fn print_prompt(cwd: &str) {
+    if cwd.is_empty() {
+        print!("/> ");
+    } else {
+        print!("/{}/> ", cwd);
+    }
+}
+
+fn normalize_path(cwd: &str, input: &str) -> String {
+    if input.is_empty() {
+        return String::from(cwd);
+    }
+
+    let mut segments: Vec<String> = if input.starts_with('/') {
+        Vec::new()
+    } else {
+        cwd.split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(String::from)
+            .collect()
+    };
+
+    for part in input.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            segments.pop();
+            continue;
+        }
+        segments.push(String::from(part));
+    }
+
+    segments.join("/")
 }
 
 #[entry]
