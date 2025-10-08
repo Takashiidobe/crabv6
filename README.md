@@ -14,7 +14,7 @@ including swapping out the allocator for `linked_list_allocator`.
 
 ## Initializing the file system
 
-Create a file system image to use if it doesn't exist already.
+Create a file system image to use if it does not exist already:
 
 ```sh
 dd if=/dev/zero of=disk.img bs=1M count=16

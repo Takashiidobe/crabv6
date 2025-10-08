@@ -124,48 +124,61 @@ fn handle_fs_command(command: &str) {
     };
 
     match subcommand {
-        "ls" => match crate::fs::list_files() {
-            Ok(files) => {
-                if files.is_empty() {
-                    println!("(empty)");
-                    return;
+        "ls" => {
+            let path = parts.next();
+            match crate::fs::list_files(path) {
+                Ok(entries) => {
+                    if entries.is_empty() {
+                        println!("(empty)");
+                    } else {
+                        for name in entries {
+                            println!("{}", name);
+                        }
+                    }
                 }
-
-                for name in files {
-                    println!("{}", name);
-                }
-            }
-            Err(err) => println!("fs error: {}", err),
-        },
-        "cat" => match parts.next() {
-            Some(name) => match crate::fs::read_file(name) {
-                Ok(contents) => match String::from_utf8(contents) {
-                    Ok(text) => println!("{}", text),
-                    Err(_) => println!("fs error: file is not valid UTF-8"),
-                },
                 Err(err) => println!("fs error: {}", err),
-            },
-            None => {
-                println!("usage: fs cat <name>");
             }
-        },
+        }
+        "mkdir" => {
+            if let Some(path) = parts.next() {
+                match crate::fs::mkdir(path) {
+                    Ok(()) => println!("created directory {}", path),
+                    Err(err) => println!("fs error: {}", err),
+                }
+            } else {
+                println!("usage: fs mkdir <path>");
+            }
+        }
+        "cat" => {
+            if let Some(path) = parts.next() {
+                match crate::fs::read_file(path) {
+                    Ok(contents) => match String::from_utf8(contents) {
+                        Ok(text) => println!("{}", text),
+                        Err(_) => println!("fs error: file is not valid UTF-8"),
+                    },
+                    Err(err) => println!("fs error: {}", err),
+                }
+            } else {
+                println!("usage: fs cat <path>");
+            }
+        }
         "write" => {
-            let trim_fs = command.strip_prefix("fs").unwrap_or("").trim_start();
-            let rest = trim_fs.strip_prefix("write").unwrap_or("").trim_start();
+            let rest = command.strip_prefix("fs").unwrap_or("").trim_start();
+            let rest = rest.strip_prefix("write").unwrap_or("").trim_start();
             if rest.is_empty() {
-                println!("usage: fs write <name> <text>");
+                println!("usage: fs write <path> <text>");
                 return;
             }
-            let Some(name) = rest.split_ascii_whitespace().next() else {
-                println!("usage: fs write <name> <text>");
+            let mut rest_parts = rest.splitn(2, |c: char| c.is_ascii_whitespace());
+            let Some(path) = rest_parts.next() else {
+                println!("usage: fs write <path> <text>");
                 return;
             };
-            let data = rest[name.len()..].trim_start();
-            if data.is_empty() {
-                println!("usage: fs write <name> <text>");
+            let Some(data) = rest_parts.next() else {
+                println!("usage: fs write <path> <text>");
                 return;
-            }
-            match crate::fs::write_file(name, data.as_bytes()) {
+            };
+            match crate::fs::write_file(path, data.as_bytes()) {
                 Ok(()) => println!("wrote {} bytes", data.len()),
                 Err(err) => println!("fs error: {}", err),
             }
@@ -182,9 +195,10 @@ fn handle_fs_command(command: &str) {
 
 fn print_fs_usage() {
     println!("fs commands:");
-    println!("  fs ls");
-    println!("  fs cat <name>");
-    println!("  fs write <name> <text>");
+    println!("  fs ls [path]");
+    println!("  fs cat <path>");
+    println!("  fs write <path> <text>");
+    println!("  fs mkdir <path>");
     println!("  fs format");
 }
 

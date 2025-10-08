@@ -6,11 +6,11 @@ use crate::virtio::block::{self, VirtIoBlock, VirtioError};
 
 pub const BLOCK_SIZE: usize = 512;
 const MAGIC: u32 = 0x5446_5331;
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const DIR_BLOCK_INDEX: u32 = 1;
 const DATA_START_BLOCK: u32 = 2;
 const NAME_LEN: usize = 32;
-const DIR_ENTRY_SIZE: usize = NAME_LEN + 4 + 4;
+const DIR_ENTRY_SIZE: usize = NAME_LEN + 4 + 4 + 1 + 3;
 const MAX_FILES: usize = BLOCK_SIZE / DIR_ENTRY_SIZE;
 
 static FS_INSTANCE: Mutex<Option<TinyFs<VirtIoBlock>>> = Mutex::new(None);
@@ -24,6 +24,9 @@ pub enum FsError {
     NoSpace,
     InvalidEncoding,
     DeviceInitFailed(VirtioError),
+    InvalidPath,
+    NotADirectory,
+    AlreadyExists,
 }
 
 impl fmt::Display for FsError {
@@ -49,6 +52,9 @@ impl fmt::Display for FsError {
                 VirtioError::DeviceRejectedFeatures => "virtio feature negotiation failed",
                 VirtioError::DeviceFailure => "virtio block device failed",
             },
+            FsError::InvalidPath => "invalid path",
+            FsError::NotADirectory => "not a directory",
+            FsError::AlreadyExists => "entry already exists",
         };
         f.write_str(message)
     }
@@ -62,11 +68,32 @@ struct Superblock {
     file_count: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntryType {
+    File = 1,
+    Directory = 2,
+}
+
+impl EntryType {
+    fn from_raw(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::File),
+            2 => Some(Self::Directory),
+            _ => None,
+        }
+    }
+
+    fn to_raw(self) -> u8 {
+        self as u8
+    }
+}
+
 #[derive(Clone, Debug)]
 struct FileEntry {
     name: String,
     start_block: u32,
     length: u32,
+    kind: EntryType,
 }
 
 pub trait BlockDevice {
@@ -89,10 +116,10 @@ impl BlockDevice for VirtIoBlock {
     }
 }
 
-pub struct TinyFs<D: BlockDevice> {
+struct TinyFs<D: BlockDevice> {
     device: D,
     superblock: Superblock,
-    directory: Vec<FileEntry>,
+    root_entries: Vec<FileEntry>,
 }
 
 impl<D: BlockDevice> TinyFs<D> {
@@ -100,7 +127,7 @@ impl<D: BlockDevice> TinyFs<D> {
         let mut fs = Self {
             superblock: Superblock::default(),
             device,
-            directory: Vec::new(),
+            root_entries: Vec::new(),
         };
         fs.load_or_format();
         fs
@@ -114,7 +141,7 @@ impl<D: BlockDevice> TinyFs<D> {
             self.format_disk();
         } else {
             self.superblock = superblock;
-            self.load_directory();
+            self.load_root_directory();
         }
     }
 
@@ -129,32 +156,19 @@ impl<D: BlockDevice> TinyFs<D> {
             next_free_block: DATA_START_BLOCK,
             file_count: 0,
         };
-        self.directory.clear();
+        self.root_entries.clear();
+        self.flush_root_directory();
         self.flush_superblock();
-        self.flush_directory();
     }
 
-    fn load_directory(&mut self) {
-        self.directory.clear();
+    fn load_root_directory(&mut self) {
+        self.root_entries.clear();
         let mut buf = [0u8; BLOCK_SIZE];
         self.device.read_block(DIR_BLOCK_INDEX, &mut buf);
         for chunk in buf.chunks(DIR_ENTRY_SIZE).take(MAX_FILES) {
-            if chunk[0] == 0 {
-                continue;
+            if let Some(entry) = deserialize_entry(chunk) {
+                self.root_entries.push(entry);
             }
-            let name_bytes = &chunk[..NAME_LEN];
-            let end = name_bytes.iter().position(|&b| b == 0).unwrap_or(NAME_LEN);
-            let name_slice = &name_bytes[..end];
-            let Ok(name_str) = str::from_utf8(name_slice) else {
-                continue;
-            };
-            let start_block = u32::from_le_bytes(chunk[NAME_LEN..NAME_LEN + 4].try_into().unwrap());
-            let length = u32::from_le_bytes(chunk[NAME_LEN + 4..NAME_LEN + 8].try_into().unwrap());
-            self.directory.push(FileEntry {
-                name: String::from(name_str),
-                start_block,
-                length,
-            });
         }
     }
 
@@ -167,17 +181,11 @@ impl<D: BlockDevice> TinyFs<D> {
         self.device.write_block(0, &buf);
     }
 
-    fn flush_directory(&mut self) {
+    fn flush_root_directory(&mut self) {
         let mut buf = [0u8; BLOCK_SIZE];
-        for (slot, entry) in self.directory.iter().enumerate().take(MAX_FILES) {
+        for (slot, entry) in self.root_entries.iter().enumerate().take(MAX_FILES) {
             let offset = slot * DIR_ENTRY_SIZE;
-            let name_bytes = entry.name.as_bytes();
-            let copy_len = NAME_LEN.min(name_bytes.len());
-            buf[offset..offset + copy_len].copy_from_slice(&name_bytes[..copy_len]);
-            buf[offset + NAME_LEN..offset + NAME_LEN + 4]
-                .copy_from_slice(&entry.start_block.to_le_bytes());
-            buf[offset + NAME_LEN + 4..offset + NAME_LEN + 8]
-                .copy_from_slice(&entry.length.to_le_bytes());
+            write_entry(&mut buf[offset..offset + DIR_ENTRY_SIZE], entry);
         }
         self.device.write_block(DIR_BLOCK_INDEX, &buf);
     }
@@ -200,34 +208,28 @@ impl<D: BlockDevice> TinyFs<D> {
         Ok(start)
     }
 
-    fn ensure_directory_slot(&mut self, name: &str) -> Result<(), FsError> {
-        if self.directory.len() < MAX_FILES {
-            return Ok(());
+    fn allocate_and_write(&mut self, contents: &[u8]) -> Result<(u32, u32), FsError> {
+        if contents.is_empty() {
+            return Ok((0, 0));
         }
-        if self
-            .directory
-            .iter()
-            .any(|entry| entry.name.as_str() == name)
-        {
-            return Ok(());
+        let blocks_needed = contents.len().div_ceil(BLOCK_SIZE) as u32;
+        let start_block = self.allocate_blocks(blocks_needed)?;
+        let mut buf = [0u8; BLOCK_SIZE];
+        for (i, chunk) in contents.chunks(BLOCK_SIZE).enumerate() {
+            buf.fill(0);
+            buf[..chunk.len()].copy_from_slice(chunk);
+            self.device.write_block(start_block + i as u32, &buf);
         }
-        Err(FsError::DirectoryFull)
+        Ok((start_block, contents.len() as u32))
     }
 
-    pub fn list(&self) -> Vec<String> {
-        self.directory
-            .iter()
-            .map(|entry| entry.name.clone())
-            .collect()
-    }
-
-    pub fn read_file(&self, name: &str) -> Result<Vec<u8>, FsError> {
-        let Some(entry) = self.directory.iter().find(|e| e.name == name) else {
-            return Err(FsError::NotFound);
-        };
-        let mut remaining = entry.length as usize;
+    fn read_data(&self, start_block: u32, length: u32) -> Vec<u8> {
+        if length == 0 {
+            return Vec::new();
+        }
+        let mut remaining = length as usize;
         let mut data = Vec::with_capacity(remaining);
-        let mut block_index = entry.start_block;
+        let mut block_index = start_block;
         let mut buf = vec![0u8; BLOCK_SIZE];
         while remaining > 0 {
             self.device.read_block(block_index, &mut buf);
@@ -236,52 +238,233 @@ impl<D: BlockDevice> TinyFs<D> {
             remaining -= take;
             block_index += 1;
         }
-        Ok(data)
+        data
     }
 
-    pub fn write_file(&mut self, name: &str, contents: &[u8]) -> Result<(), FsError> {
-        if name.is_empty() || name.len() > NAME_LEN {
-            return Err(FsError::NameTooLong);
+    fn read_directory_entries(&self, entry: &FileEntry) -> Result<Vec<FileEntry>, FsError> {
+        if entry.kind != EntryType::Directory {
+            return Err(FsError::NotADirectory);
         }
-        self.ensure_directory_slot(name)?;
-
-        let blocks_needed = contents.len().div_ceil(BLOCK_SIZE) as u32;
-        let start_block = self.allocate_blocks(blocks_needed)?;
-
-        let mut buf = [0u8; BLOCK_SIZE];
-        for (i, chunk) in contents.chunks(BLOCK_SIZE).enumerate() {
-            buf.fill(0);
-            buf[..chunk.len()].copy_from_slice(chunk);
-            self.device.write_block(start_block + i as u32, &buf);
+        if entry.length == 0 {
+            return Ok(Vec::new());
         }
-
-        match self
-            .directory
-            .iter_mut()
-            .find(|entry| entry.name.as_str() == name)
-        {
-            Some(entry) => {
-                entry.start_block = start_block;
-                entry.length = contents.len() as u32;
+        let raw = self.read_data(entry.start_block, entry.length);
+        let mut entries = Vec::new();
+        for chunk in raw.chunks(DIR_ENTRY_SIZE) {
+            if chunk.len() < DIR_ENTRY_SIZE {
+                break;
             }
-            None => {
-                self.directory.push(FileEntry {
-                    name: String::from(name),
-                    start_block,
-                    length: contents.len() as u32,
-                });
-                self.superblock.file_count = self.directory.len() as u32;
+            if let Some(e) = deserialize_entry(chunk) {
+                entries.push(e);
             }
         }
+        Ok(entries)
+    }
 
+    fn write_directory_entries(&mut self, entries: &[FileEntry]) -> Result<(u32, u32), FsError> {
+        if entries.is_empty() {
+            return Ok((0, 0));
+        }
+        let mut data = vec![0u8; entries.len() * DIR_ENTRY_SIZE];
+        for (i, entry) in entries.iter().enumerate() {
+            let offset = i * DIR_ENTRY_SIZE;
+            write_entry(&mut data[offset..offset + DIR_ENTRY_SIZE], entry);
+        }
+        self.allocate_and_write(&data)
+    }
+
+    fn split_path<'a>(&self, path: &'a str) -> Result<Vec<&'a str>, FsError> {
+        if path.is_empty() {
+            return Ok(Vec::new());
+        }
+        let components: Vec<&str> = path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect();
+        Ok(components)
+    }
+
+    fn load_directory_chain<'a>(
+        &mut self,
+        components: &[&'a str],
+    ) -> Result<Vec<LoadedDir>, FsError> {
+        let mut chain = Vec::new();
+        chain.push(LoadedDir {
+            entries: self.root_entries.clone(),
+            entry_index_in_parent: None,
+        });
+
+        for component in components {
+            if component.is_empty() {
+                continue;
+            }
+            let current = chain.last().expect("chain always has root");
+            let Some((idx, entry)) = current
+                .entries
+                .iter()
+                .enumerate()
+                .find(|(_, e)| e.name == *component)
+            else {
+                return Err(FsError::NotFound);
+            };
+            if entry.kind != EntryType::Directory {
+                return Err(FsError::NotADirectory);
+            }
+            let child_entries = self.read_directory_entries(entry)?;
+            chain.push(LoadedDir {
+                entries: child_entries,
+                entry_index_in_parent: Some(idx),
+            });
+        }
+
+        Ok(chain)
+    }
+
+    fn persist_directory_chain(&mut self, chain: &mut Vec<LoadedDir>) -> Result<(), FsError> {
+        for level in (1..chain.len()).rev() {
+            let (parents, current) = chain.split_at_mut(level);
+            let parent = &mut parents[level - 1];
+            let current_dir = &current[0];
+            let (start, length) = self.write_directory_entries(&current_dir.entries)?;
+            if let Some(idx) = current_dir.entry_index_in_parent {
+                parent.entries[idx].start_block = start;
+                parent.entries[idx].length = length;
+            }
+        }
+        self.root_entries = core::mem::take(&mut chain[0].entries);
+        self.superblock.file_count = self.root_entries.len() as u32;
+        self.flush_root_directory();
         self.flush_superblock();
-        self.flush_directory();
         Ok(())
     }
 
-    pub fn format(&mut self) {
-        self.format_disk();
+    fn list_directory(&mut self, path: &str) -> Result<Vec<String>, FsError> {
+        let components = self.split_path(path)?;
+        let chain = self.load_directory_chain(&components)?;
+        let entries = &chain.last().expect("chain non-empty").entries;
+        let mut names = Vec::with_capacity(entries.len());
+        for entry in entries {
+            match entry.kind {
+                EntryType::File => names.push(entry.name.clone()),
+                EntryType::Directory => {
+                    let mut name = entry.name.clone();
+                    name.push('/');
+                    names.push(name);
+                }
+            }
+        }
+        Ok(names)
     }
+
+    fn read_file_contents(&mut self, path: &str) -> Result<Vec<u8>, FsError> {
+        let components = self.split_path(path)?;
+        if components.is_empty() {
+            return Err(FsError::InvalidPath);
+        }
+        let (dirs, leaf) = components.split_at(components.len() - 1);
+        let mut chain = self.load_directory_chain(dirs)?;
+        let entries = chain.last_mut().expect("chain non-empty");
+        let Some(entry) = entries.entries.iter().find(|entry| entry.name == leaf[0]) else {
+            return Err(FsError::NotFound);
+        };
+        if entry.kind != EntryType::File {
+            return Err(FsError::NotADirectory);
+        }
+        Ok(self.read_data(entry.start_block, entry.length))
+    }
+
+    fn write_file_contents(&mut self, path: &str, contents: &[u8]) -> Result<(), FsError> {
+        let components = self.split_path(path)?;
+        if components.is_empty() {
+            return Err(FsError::InvalidPath);
+        }
+        let (dirs, leaf) = components.split_at(components.len() - 1);
+        let file_name = leaf[0];
+        if file_name.is_empty() || file_name.len() > NAME_LEN {
+            return Err(FsError::NameTooLong);
+        }
+        let mut chain = self.load_directory_chain(dirs)?;
+        let parent_is_root = chain.len() == 1;
+        let parent_entries = chain.last_mut().expect("chain non-empty");
+
+        let existing_index = parent_entries
+            .entries
+            .iter()
+            .position(|entry| entry.name == file_name);
+
+        if existing_index.is_none() {
+            if parent_is_root && parent_entries.entries.len() >= MAX_FILES {
+                return Err(FsError::DirectoryFull);
+            }
+        }
+
+        let (start_block, length) = self.allocate_and_write(contents)?;
+
+        match existing_index {
+            Some(idx) => {
+                if parent_entries.entries[idx].kind != EntryType::File {
+                    return Err(FsError::NotADirectory);
+                }
+                parent_entries.entries[idx].start_block = start_block;
+                parent_entries.entries[idx].length = length;
+            }
+            None => {
+                parent_entries.entries.push(FileEntry {
+                    name: String::from(file_name),
+                    start_block,
+                    length,
+                    kind: EntryType::File,
+                });
+            }
+        }
+
+        self.persist_directory_chain(&mut chain)
+    }
+
+    fn create_directory(&mut self, path: &str) -> Result<(), FsError> {
+        let components = self.split_path(path)?;
+        if components.is_empty() {
+            return Err(FsError::InvalidPath);
+        }
+        let (dirs, leaf) = components.split_at(components.len() - 1);
+        let dir_name = leaf[0];
+        if dir_name.is_empty() || dir_name.len() > NAME_LEN {
+            return Err(FsError::NameTooLong);
+        }
+        let mut chain = self.load_directory_chain(dirs)?;
+        let parent_is_root = chain.len() == 1;
+        let parent_entries = chain.last_mut().expect("chain non-empty");
+
+        if let Some(entry) = parent_entries
+            .entries
+            .iter()
+            .find(|entry| entry.name == dir_name)
+        {
+            if entry.kind == EntryType::Directory {
+                return Err(FsError::AlreadyExists);
+            } else {
+                return Err(FsError::AlreadyExists);
+            }
+        }
+
+        if parent_is_root && parent_entries.entries.len() >= MAX_FILES {
+            return Err(FsError::DirectoryFull);
+        }
+
+        parent_entries.entries.push(FileEntry {
+            name: String::from(dir_name),
+            start_block: 0,
+            length: 0,
+            kind: EntryType::Directory,
+        });
+
+        self.persist_directory_chain(&mut chain)
+    }
+}
+
+struct LoadedDir {
+    entries: Vec<FileEntry>,
+    entry_index_in_parent: Option<usize>,
 }
 
 pub fn init() -> Result<(), FsError> {
@@ -303,21 +486,61 @@ fn with_fs<T>(
     }
 }
 
-pub fn list_files() -> Result<Vec<String>, FsError> {
-    with_fs(|fs| Ok(fs.list()))
+pub fn list_files(path: Option<&str>) -> Result<Vec<String>, FsError> {
+    let path = path.unwrap_or("");
+    with_fs(|fs| fs.list_directory(path))
 }
 
-pub fn read_file(name: &str) -> Result<Vec<u8>, FsError> {
-    with_fs(|fs| fs.read_file(name))
+pub fn read_file(path: &str) -> Result<Vec<u8>, FsError> {
+    with_fs(|fs| fs.read_file_contents(path))
 }
 
-pub fn write_file(name: &str, data: &[u8]) -> Result<(), FsError> {
-    with_fs(|fs| fs.write_file(name, data))
+pub fn write_file(path: &str, data: &[u8]) -> Result<(), FsError> {
+    with_fs(|fs| fs.write_file_contents(path, data))
+}
+
+pub fn mkdir(path: &str) -> Result<(), FsError> {
+    with_fs(|fs| fs.create_directory(path))
 }
 
 pub fn format() -> Result<(), FsError> {
     with_fs(|fs| {
-        fs.format();
+        fs.format_disk();
         Ok(())
+    })
+}
+
+fn write_entry(buf: &mut [u8], entry: &FileEntry) {
+    buf.fill(0);
+    let name_bytes = entry.name.as_bytes();
+    let copy_len = NAME_LEN.min(name_bytes.len());
+    buf[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+    buf[NAME_LEN..NAME_LEN + 4].copy_from_slice(&entry.start_block.to_le_bytes());
+    buf[NAME_LEN + 4..NAME_LEN + 8].copy_from_slice(&entry.length.to_le_bytes());
+    buf[NAME_LEN + 8] = entry.kind.to_raw();
+}
+
+fn deserialize_entry(chunk: &[u8]) -> Option<FileEntry> {
+    if chunk.len() < DIR_ENTRY_SIZE {
+        return None;
+    }
+    if chunk[0] == 0 {
+        return None;
+    }
+    let name_bytes = &chunk[..NAME_LEN];
+    let end = name_bytes.iter().position(|&b| b == 0).unwrap_or(NAME_LEN);
+    let name_slice = &name_bytes[..end];
+    let name = match str::from_utf8(name_slice) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    let start_block = u32::from_le_bytes(chunk[NAME_LEN..NAME_LEN + 4].try_into().unwrap());
+    let length = u32::from_le_bytes(chunk[NAME_LEN + 4..NAME_LEN + 8].try_into().unwrap());
+    let kind = EntryType::from_raw(chunk[NAME_LEN + 8])?;
+    Some(FileEntry {
+        name: String::from(name),
+        start_block,
+        length,
+        kind,
     })
 }
