@@ -13,9 +13,12 @@ use riscv_rt::entry;
 mod panic_handler;
 mod utils;
 
+mod elf;
+mod embedded;
 mod fs;
 mod heap;
 mod interrupts;
+mod process;
 mod syscall;
 mod uart;
 pub mod user;
@@ -75,6 +78,7 @@ fn print_help_text() {
     println!("  help      print this help message  (alias: h, ?)");
     println!("  shutdown  shutdown the machine     (alias: sd, exit)");
     println!("  fs        simple filesystem tools   (try: fs ls)");
+    println!("  run       load and execute ELF user program");
 }
 
 fn process_command(command: &str, cwd: &mut String) {
@@ -93,6 +97,9 @@ fn process_command(command: &str, cwd: &mut String) {
         "breakpoint" => {
             unsafe { asm!("ebreak") };
         }
+        c if c.starts_with("run") => {
+            handle_run_command(c, cwd);
+        }
         "syscalltest" => unsafe {
             let msg = b"hello from syscall\n";
             let mut ret: usize;
@@ -106,11 +113,11 @@ fn process_command(command: &str, cwd: &mut String) {
             );
             println!("sys_write returned {}", ret as isize);
         },
-        c if c.starts_with("fs") => {
-            handle_fs_command(c, cwd);
+        command if command.starts_with("fs") => {
+            handle_fs_command(command, cwd);
         }
-        c if c.starts_with("echo") => {
-            let output: Vec<_> = c.split_ascii_whitespace().skip(1).collect();
+        command if command.starts_with("echo") => {
+            let output: Vec<_> = command.split_ascii_whitespace().skip(1).collect();
             println!("{}", output.join(" "));
         }
         "" => {}
@@ -265,6 +272,41 @@ fn print_fs_usage() {
     println!("  fs format");
 }
 
+fn handle_run_command(command: &str, cwd: &str) {
+    let mut parts = command.split_ascii_whitespace();
+    let Some(cmd) = parts.next() else {
+        return;
+    };
+    if cmd != "run" {
+        println!("unknown command: {command}");
+        return;
+    }
+
+    let Some(path_arg) = parts.next() else {
+        println!("usage: run <path>");
+        return;
+    };
+
+    if let Err(err) = crate::fs::init() {
+        println!("fs error: {}", err);
+        return;
+    }
+
+    let target = normalize_path(cwd, path_arg);
+    let path = target.as_str();
+
+    match crate::process::load(path) {
+        Ok(program) => {
+            crate::process::dump(&program);
+            println!("launching {}", path);
+            unsafe { crate::process::enter_user(&program) };
+        }
+        Err(crate::process::LoadError::Fs(err)) => println!("fs error: {}", err),
+        Err(crate::process::LoadError::Elf(err)) => println!("elf error: {:?}", err),
+        Err(crate::process::LoadError::OutOfMemory) => println!("loader error: out of memory"),
+    }
+}
+
 fn print_prompt(cwd: &str) {
     if cwd.is_empty() {
         print!("/> ");
@@ -301,6 +343,26 @@ fn normalize_path(cwd: &str, input: &str) -> String {
     segments.join("/")
 }
 
+fn install_embedded_bins() {
+    use crate::fs::{self, FsError};
+
+    if let Err(err) = fs::mkdir("/bin") {
+        if !matches!(err, FsError::AlreadyExists) {
+            println!("fs error: {}", err);
+            return;
+        }
+    }
+
+    match fs::read_file("/bin/cat2") {
+        Ok(_) => {}
+        Err(FsError::NotFound) => match fs::write_file("/bin/cat2", crate::embedded::CAT2_BIN) {
+            Ok(_) => println!("installed /bin/cat2"),
+            Err(err) => println!("fs error: {}", err),
+        },
+        Err(err) => println!("fs error: {}", err),
+    }
+}
+
 #[entry]
 fn main(a0: usize) -> ! {
     if a0 != 0 {
@@ -316,8 +378,9 @@ fn main(a0: usize) -> ! {
 
     println!("Hello world from hart {}!\n", a0);
 
-    if let Err(err) = crate::fs::init() {
-        println!("failed to initialize filesystem: {}", err);
+    match crate::fs::init() {
+        Ok(()) => install_embedded_bins(),
+        Err(err) => println!("failed to initialize filesystem: {}", err),
     }
 
     shell()

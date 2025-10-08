@@ -20,3 +20,5 @@ Create a file system image to use if it does not exist already:
 ```sh
 dd if=/dev/zero of=disk.img bs=1M count=16
 ```
+
+Inside the shell you can use `fs` commands (mkdir, write, ls, cd, cat, format) to manage the disk. Use `run <path>` to load an ELF binary and jump to user mode.

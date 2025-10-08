@@ -1,0 +1,19 @@
+[package]
+name = "cat2"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+
+[[bin]]
+name = "cat2"
+path = "src/main.rs"
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+lto = true
+opt-level = "s"
+strip = true
