@@ -7,13 +7,12 @@ const SYS_WRITE: usize = 1;
 const SYS_EXIT: usize = 2;
 const SYS_FILE_READ: usize = 4;
 
-const PATH: &str = "cat2.txt";
-
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
     let mut buf = [0u8; 4096];
-    let len = read_file(PATH, &mut buf);
+    // TODO: handle env to pass in argument to this function
+    let len = read_file("test.txt", &mut buf);
     if len <= 0 {
         write(1, b"cat2: no data\n");
         exit(1);

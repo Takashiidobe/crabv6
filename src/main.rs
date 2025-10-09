@@ -205,6 +205,22 @@ fn handle_fs_command(command: &str, cwd: &mut String) {
                 println!("usage: fs mkdir <path>");
             }
         }
+        "rm" => {
+            if let Some(path) = parts.next() {
+                let target = normalize_path(cwd.as_str(), path);
+                let fs_path = if target.is_empty() {
+                    ""
+                } else {
+                    target.as_str()
+                };
+                match crate::fs::remove_file(fs_path) {
+                    Ok(()) => println!("created directory {}", path),
+                    Err(err) => println!("fs error: {}", err),
+                }
+            } else {
+                println!("usage: fs rm <path>");
+            }
+        }
         "cat" => {
             if let Some(path) = parts.next() {
                 let target = normalize_path(cwd.as_str(), path);
@@ -270,6 +286,7 @@ fn print_fs_usage() {
     println!("  fs cat <path>");
     println!("  fs write <path> <text>");
     println!("  fs cd <path>");
+    println!("  fs rm <path>");
     println!("  fs mkdir <path>");
     println!("  fs format");
 }
@@ -349,10 +366,16 @@ fn install_embedded_bins() {
     use crate::fs::{self, FsError};
 
     if let Err(err) = fs::mkdir("/bin")
-        && !matches!(err, FsError::AlreadyExists) {
-            println!("fs error: {}", err);
-            return;
-        }
+        && !matches!(err, FsError::AlreadyExists)
+    {
+        println!("fs error: {}", err);
+        return;
+    }
+
+    if let Err(err) = fs::write_file("cat2.txt", &[0, 0]) {
+        println!("fs error: {}", err);
+        return;
+    }
 
     match fs::read_file("/bin/cat2") {
         Ok(_) => {}
