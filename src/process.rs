@@ -2,12 +2,23 @@ use alloc::{format, vec, vec::Vec};
 use core::ptr;
 
 use riscv::register::sstatus::{self, SPP};
+use riscv_rt::TrapFrame;
 
 use crate::{elf::ElfFile, fs, uart};
 
 const USER_IMAGE_BASE: u64 = 0x8040_0000;
 const USER_IMAGE_LIMIT: u64 = USER_IMAGE_BASE + 0x0002_0000; // 128 KiB window
 const USER_STACK_SIZE: usize = 8 * 1024;
+
+#[unsafe(no_mangle)]
+static mut KERNEL_STACK_POINTER: usize = 0;
+#[unsafe(no_mangle)]
+static mut KERNEL_RETURN_ADDRESS: usize = 0;
+
+unsafe extern "C" {
+    fn enter_user_trampoline(entry: usize, stack_top: usize) -> isize;
+    fn kernel_resume_from_user();
+}
 
 #[derive(Debug)]
 pub enum LoadError {
@@ -87,7 +98,7 @@ pub fn dump(program: &LoadedProgram) {
     }
 }
 
-pub unsafe fn enter_user(program: &LoadedProgram) -> ! {
+pub unsafe fn enter_user(program: &LoadedProgram) -> isize {
     for seg in &program.segments {
         unsafe {
             ptr::copy_nonoverlapping(seg.data.as_ptr(), seg.dest, seg.data.len());
@@ -105,14 +116,15 @@ pub unsafe fn enter_user(program: &LoadedProgram) -> ! {
     let trampoline_stack = program.stack_top as usize;
     let entry = program.entry as usize;
 
+    unsafe { enter_user_trampoline(entry, trampoline_stack) }
+}
+
+pub unsafe fn prepare_for_kernel_return(trap_frame: *mut TrapFrame, code: isize) {
     unsafe {
-        core::arch::asm!(
-            "mv sp, {stack}",
-            "csrw sepc, {entry}",
-            "sret",
-            stack = in(reg) trampoline_stack,
-            entry = in(reg) entry,
-            options(noreturn)
-        );
+        (*trap_frame).ra = KERNEL_RETURN_ADDRESS;
+        sstatus::set_spp(SPP::Supervisor);
+        riscv::register::sepc::write(kernel_resume_from_user as usize);
+        // Propagate exit code back to the caller through a0 when we return to kernel mode
+        (*trap_frame).a0 = code as usize;
     }
 }

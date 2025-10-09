@@ -105,7 +105,11 @@ fn sys_exit(trap_frame: &TrapFrame) -> Result<usize, SysError> {
     let mut buf = String::new();
     let _ = write!(&mut buf, "[process exited with code {}]\n", code);
     uart::write_str(&buf);
-    Ok(0)
+    let trap_ptr = trap_frame as *const TrapFrame as *mut TrapFrame;
+    unsafe {
+        crate::process::prepare_for_kernel_return(trap_ptr, code);
+    }
+    Ok(code as usize)
 }
 
 fn sys_file_write(trap_frame: &TrapFrame) -> Result<usize, SysError> {

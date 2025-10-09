@@ -24,6 +24,8 @@ mod uart;
 pub mod user;
 mod virtio;
 
+core::arch::global_asm!(include_str!("kernel_entry.S"));
+
 pub const ENTER: u8 = 13;
 pub const BACKSPACE: u8 = 127;
 pub const CTRL_C: u8 = 3;
