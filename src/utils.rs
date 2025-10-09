@@ -1,4 +1,3 @@
-use sbi;
 
 pub fn print(t: &str) {
     crate::uart::write_str(t);

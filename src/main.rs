@@ -348,12 +348,11 @@ fn normalize_path(cwd: &str, input: &str) -> String {
 fn install_embedded_bins() {
     use crate::fs::{self, FsError};
 
-    if let Err(err) = fs::mkdir("/bin") {
-        if !matches!(err, FsError::AlreadyExists) {
+    if let Err(err) = fs::mkdir("/bin")
+        && !matches!(err, FsError::AlreadyExists) {
             println!("fs error: {}", err);
             return;
         }
-    }
 
     match fs::read_file("/bin/cat2") {
         Ok(_) => {}
