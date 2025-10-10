@@ -55,68 +55,34 @@ pub mod block {
     }
 
     #[repr(C, align(2))]
+    #[derive(ConstDefault, Debug, Clone, Copy)]
     struct VirtqAvail {
         flags: u16,
         idx: u16,
         ring: [u16; QUEUE_SIZE],
     }
 
-    impl VirtqAvail {
-        const fn new() -> Self {
-            Self {
-                flags: 0,
-                idx: 0,
-                ring: [0; QUEUE_SIZE],
-            }
-        }
-    }
-
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(ConstDefault, Debug, Clone, Copy)]
     struct VirtqUsedElem {
         id: u32,
         len: u32,
     }
 
-    impl VirtqUsedElem {
-        const fn new() -> Self {
-            Self { id: 0, len: 0 }
-        }
-    }
-
     #[repr(C, align(4096))]
+    #[derive(ConstDefault, Debug, Clone, Copy)]
     struct VirtqUsed {
         flags: u16,
         idx: u16,
         ring: [VirtqUsedElem; QUEUE_SIZE],
     }
 
-    impl VirtqUsed {
-        const fn new() -> Self {
-            Self {
-                flags: 0,
-                idx: 0,
-                ring: [VirtqUsedElem::new(); QUEUE_SIZE],
-            }
-        }
-    }
-
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(ConstDefault, Debug, Clone, Copy)]
     struct VirtioBlkReqHeader {
         ty: u32,
         reserved: u32,
         sector: u64,
-    }
-
-    impl VirtioBlkReqHeader {
-        const fn new() -> Self {
-            Self {
-                ty: 0,
-                reserved: 0,
-                sector: 0,
-            }
-        }
     }
 
     enum RequestType {
@@ -282,26 +248,18 @@ pub mod block {
     const VIRTQ_DESC_F_NEXT: u16 = 1;
     const VIRTQ_DESC_F_WRITE: u16 = 2;
 
+    #[derive(ConstDefault, Debug, Clone, Copy)]
     struct VirtQueueState {
         next_avail: u16,
         last_used: u16,
     }
 
-    impl VirtQueueState {
-        const fn new() -> Self {
-            Self {
-                next_avail: 0,
-                last_used: 0,
-            }
-        }
-    }
-
     static mut VIRTQ_DESC: [VirtqDesc; QUEUE_SIZE] = [VirtqDesc::DEFAULT; QUEUE_SIZE];
-    static mut VIRTQ_AVAIL: VirtqAvail = VirtqAvail::new();
-    static mut VIRTQ_USED: VirtqUsed = VirtqUsed::new();
-    static mut REQUEST_HEADER: VirtioBlkReqHeader = VirtioBlkReqHeader::new();
+    static mut VIRTQ_AVAIL: VirtqAvail = VirtqAvail::DEFAULT;
+    static mut VIRTQ_USED: VirtqUsed = VirtqUsed::DEFAULT;
+    static mut REQUEST_HEADER: VirtioBlkReqHeader = VirtioBlkReqHeader::DEFAULT;
     static mut REQUEST_STATUS: u8 = 0;
-    static QUEUE_STATE: Mutex<VirtQueueState> = Mutex::new(VirtQueueState::new());
+    static QUEUE_STATE: Mutex<VirtQueueState> = Mutex::new(VirtQueueState::DEFAULT);
 
     pub fn init() -> Result<VirtIoBlock, VirtioError> {
         let mut guard = DEVICE.lock();
@@ -421,13 +379,16 @@ pub mod block {
             for i in 0..QUEUE_SIZE {
                 ptr::write(desc_base.add(i), VirtqDesc::DEFAULT);
             }
-            ptr::write(ptr::addr_of_mut!(VIRTQ_AVAIL), VirtqAvail::new());
-            ptr::write(ptr::addr_of_mut!(VIRTQ_USED), VirtqUsed::new());
-            ptr::write(ptr::addr_of_mut!(REQUEST_HEADER), VirtioBlkReqHeader::new());
+            ptr::write(ptr::addr_of_mut!(VIRTQ_AVAIL), VirtqAvail::DEFAULT);
+            ptr::write(ptr::addr_of_mut!(VIRTQ_USED), VirtqUsed::DEFAULT);
+            ptr::write(
+                ptr::addr_of_mut!(REQUEST_HEADER),
+                VirtioBlkReqHeader::DEFAULT,
+            );
             ptr::write(ptr::addr_of_mut!(REQUEST_STATUS), 0);
         }
         let mut state = QUEUE_STATE.lock();
-        *state = VirtQueueState::new();
+        *state = VirtQueueState::DEFAULT;
     }
 
     fn read_config() -> VirtioBlockConfig {
