@@ -16,7 +16,7 @@ static mut KERNEL_STACK_POINTER: usize = 0;
 static mut KERNEL_RETURN_ADDRESS: usize = 0;
 
 unsafe extern "C" {
-    fn enter_user_trampoline(entry: usize, stack_top: usize) -> isize;
+    fn enter_user_trampoline(entry: usize, stack_top: usize, argc: usize, argv: usize) -> isize;
     fn kernel_resume_from_user();
 }
 
@@ -98,25 +98,72 @@ pub fn dump(program: &LoadedProgram) {
     }
 }
 
-pub unsafe fn enter_user(program: &LoadedProgram) -> isize {
+pub unsafe fn enter_user(program: &LoadedProgram, args: &[&str]) -> isize {
+    // Copy program segments
     for seg in &program.segments {
         unsafe {
             ptr::copy_nonoverlapping(seg.data.as_ptr(), seg.dest, seg.data.len());
         }
     }
 
+    // Clear user stack
     let stack_base = (program.stack_top - USER_STACK_SIZE as u64) as *mut u8;
-    unsafe { ptr::write_bytes(stack_base, 0, USER_STACK_SIZE) };
+    unsafe {
+        ptr::write_bytes(stack_base, 0, USER_STACK_SIZE);
+    }
 
+    // Stack grows downward
+    let mut sp = program.stack_top as usize;
+    let argc = args.len();
+    debug_assert!(
+        argc <= 16,
+        "too many arguments passed to user program (max 16 supported)"
+    );
+    let mut arg_ptrs: [usize; 16] = [0; 16]; // support up to 16 args
+
+    // Copy arguments into stack (in reverse order)
+    for (index, &arg) in args.iter().enumerate().rev() {
+        let bytes = arg.as_bytes();
+        sp -= bytes.len() + 1;
+        copy_to_user(sp as *mut u8, bytes.as_ptr(), bytes.len());
+        write_byte_to_user((sp + bytes.len()) as *mut u8, 0);
+        arg_ptrs[index] = sp;
+    }
+
+    // Align stack pointer to 16 bytes before pushing pointer-sized values.
+    sp &= !(core::mem::size_of::<usize>() * 2 - 1);
+
+    // Ensure the total number of pointer-sized pushes keeps the stack aligned.
+    let pointer_pushes = argc + 2; // argv entries + NULL + argc
+    if pointer_pushes & 1 != 0 {
+        sp -= core::mem::size_of::<usize>();
+        write_usize_to_user(sp as *mut usize, 0); // padding
+    }
+
+    // Push NULL terminator
+    sp -= core::mem::size_of::<usize>();
+    write_usize_to_user(sp as *mut usize, 0);
+
+    // Push argv pointers (reverse back to original order)
+    for &ptr in arg_ptrs[..argc].iter().rev() {
+        sp -= core::mem::size_of::<usize>();
+        write_usize_to_user(sp as *mut usize, ptr);
+    }
+    let argv_ptr = sp;
+
+    // Push argc
+    sp -= core::mem::size_of::<usize>();
+    write_usize_to_user(sp as *mut usize, argc);
+
+    // Prepare to enter user mode
     unsafe {
         sstatus::set_spp(SPP::User);
         sstatus::set_spie();
     }
 
-    let trampoline_stack = program.stack_top as usize;
     let entry = program.entry as usize;
 
-    unsafe { enter_user_trampoline(entry, trampoline_stack) }
+    unsafe { enter_user_trampoline(entry, sp, argc, argv_ptr) }
 }
 
 pub unsafe fn prepare_for_kernel_return(trap_frame: *mut TrapFrame, code: isize) {
@@ -126,5 +173,26 @@ pub unsafe fn prepare_for_kernel_return(trap_frame: *mut TrapFrame, code: isize)
         riscv::register::sepc::write(kernel_resume_from_user as usize);
         // Propagate exit code back to the caller through a0 when we return to kernel mode
         (*trap_frame).a0 = code as usize;
+    }
+}
+
+#[inline(always)]
+unsafe fn copy_to_user(dest: *mut u8, src: *const u8, len: usize) {
+    unsafe {
+        ptr::copy_nonoverlapping(src, dest, len);
+    }
+}
+
+#[inline(always)]
+unsafe fn write_byte_to_user(dest: *mut u8, value: u8) {
+    unsafe {
+        ptr::write(dest, value);
+    }
+}
+
+#[inline(always)]
+unsafe fn write_usize_to_user(dest: *mut usize, value: usize) {
+    unsafe {
+        ptr::write(dest, value);
     }
 }

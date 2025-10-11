@@ -8,15 +8,29 @@ const SYS_EXIT: usize = 2;
 const SYS_FILE_READ: usize = 4;
 
 #[no_mangle]
-#[link_section = ".text.start"]
-pub extern "C" fn _start() -> ! {
+pub extern "C" fn _start(argc: usize, argv: *const *const u8) -> ! {
+    if argc < 2 {
+        write(1, b"Usage: cat2 <file>\n");
+        exit(1);
+    }
+
+    let filename = unsafe {
+        let args = core::slice::from_raw_parts(argv, argc);
+        let ptr = args[1];
+        let mut len = 0;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr, len))
+    };
+
     let mut buf = [0u8; 4096];
-    // TODO: handle env to pass in argument to this function
-    let len = read_file("test.txt", &mut buf);
+    let len = read_file(filename, &mut buf);
     if len <= 0 {
         write(1, b"cat2: no data\n");
         exit(1);
     }
+
     let slice = &buf[..len as usize];
     write(1, slice);
     write(1, slice);

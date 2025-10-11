@@ -4,7 +4,6 @@
 #![allow(unused)]
 
 extern crate alloc;
-extern crate riscv_rt;
 
 use core::arch::asm;
 
@@ -301,10 +300,13 @@ fn handle_run_command(command: &str, cwd: &str) {
         return;
     }
 
+    // Path to the binary to run
     let Some(path_arg) = parts.next() else {
-        println!("usage: run <path>");
+        println!("usage: run <path> [args...]");
         return;
     };
+
+    let extra_args: Vec<&str> = parts.collect();
 
     if let Err(err) = crate::fs::init() {
         println!("fs error: {}", err);
@@ -318,7 +320,12 @@ fn handle_run_command(command: &str, cwd: &str) {
         Ok(program) => {
             crate::process::dump(&program);
             println!("launching {}", path);
-            unsafe { crate::process::enter_user(&program) };
+
+            let mut args = Vec::new();
+            args.push(path);
+            args.extend(extra_args.iter().copied());
+
+            unsafe { crate::process::enter_user(&program, &args) };
         }
         Err(crate::process::LoadError::Fs(err)) => println!("fs error: {}", err),
         Err(crate::process::LoadError::Elf(err)) => println!("elf error: {:?}", err),
