@@ -39,6 +39,7 @@ kernel_resume_from_user:
     ret
 
     .section .trap, "ax"
+    .align 2
     .globl _start_trap
 _start_trap:
     csrrw   sp, sscratch, sp

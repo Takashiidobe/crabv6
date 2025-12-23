@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "cat2"
+name = "user_bin"
 version = "0.1.0"

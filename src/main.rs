@@ -7,6 +7,7 @@ extern crate alloc;
 
 use core::arch::asm;
 
+use crate::process::LoadError;
 use alloc::{string::String, vec::Vec};
 use riscv_rt::entry;
 mod panic_handler;
@@ -20,7 +21,7 @@ mod interrupts;
 mod process;
 mod syscall;
 mod uart;
-pub mod user;
+mod user;
 mod virtio;
 
 core::arch::global_asm!(include_str!("kernel_entry.S"));
@@ -78,7 +79,10 @@ fn print_help_text() {
     println!("available commands:");
     println!("  help      print this help message  (alias: h, ?)");
     println!("  shutdown  shutdown the machine     (alias: sd, exit)");
-    println!("  fs        simple filesystem tools   (try: fs ls)");
+    println!("  echo      print text to console");
+    println!("  ls        list directory contents  (usage: ls [path])");
+    println!("  cd        change directory         (usage: cd <path>)");
+    println!("  fs        simple filesystem tools  (try: fs ls)");
     println!("  run       load and execute ELF user program");
 }
 
@@ -121,9 +125,90 @@ fn process_command(command: &str, cwd: &mut String) {
             let output: Vec<_> = command.split_ascii_whitespace().skip(1).collect();
             println!("{}", output.join(" "));
         }
+        command if command.starts_with("ls") => {
+            let mut parts = command.split_ascii_whitespace();
+            parts.next(); // Skip "ls"
+            let target_path = if let Some(arg) = parts.next() {
+                normalize_path(cwd.as_str(), arg)
+            } else {
+                cwd.clone()
+            };
+            let path_opt = if target_path.is_empty() {
+                None
+            } else {
+                Some(target_path.as_str())
+            };
+
+            if let Err(err) = crate::fs::init() {
+                println!("fs error: {}", err);
+                return;
+            }
+
+            match crate::fs::list_files(path_opt) {
+                Ok(entries) => {
+                    if entries.is_empty() {
+                        println!("(empty)");
+                    } else {
+                        for name in entries {
+                            println!("{}", name);
+                        }
+                    }
+                }
+                Err(err) => println!("fs error: {}", err),
+            }
+        }
+        command if command.starts_with("cd") => {
+            let mut parts = command.split_ascii_whitespace();
+            parts.next(); // Skip "cd"
+            let path_arg = parts.next().unwrap_or("/");
+            let target = normalize_path(cwd.as_str(), path_arg);
+            let fs_path = if target.is_empty() {
+                ""
+            } else {
+                target.as_str()
+            };
+
+            if let Err(err) = crate::fs::init() {
+                println!("fs error: {}", err);
+                return;
+            }
+
+            match crate::fs::ensure_directory(fs_path) {
+                Ok(()) => {
+                    *cwd = target;
+                }
+                Err(err) => println!("fs error: {}", err),
+            }
+        }
         "" => {}
         _ => {
-            println!("unknown command: {command}");
+            // Try to execute as a binary in /bin/
+            let first_word = command.split_ascii_whitespace().next().unwrap_or("");
+            if !first_word.is_empty() {
+                let bin_path = alloc::format!("/bin/{}", first_word);
+
+                // Check if binary exists
+                if let Err(err) = crate::fs::init() {
+                    println!("fs error: {}", err);
+                    return;
+                }
+
+                match crate::fs::read_file(&bin_path) {
+                    Ok(_) => {
+                        // Binary exists, execute it with full path
+                        let rest_of_command: Vec<&str> = command.split_ascii_whitespace().skip(1).collect();
+                        let run_command = if rest_of_command.is_empty() {
+                            alloc::format!("run {}", bin_path)
+                        } else {
+                            alloc::format!("run {} {}", bin_path, rest_of_command.join(" "))
+                        };
+                        handle_run_command(&run_command, cwd);
+                    }
+                    Err(_) => {
+                        println!("unknown command: {command}");
+                    }
+                }
+            }
         }
     };
 }
@@ -149,45 +234,6 @@ fn handle_fs_command(command: &str, cwd: &mut String) {
     };
 
     match subcommand {
-        "ls" => {
-            let target_path = if let Some(arg) = parts.next() {
-                normalize_path(cwd.as_str(), arg)
-            } else {
-                cwd.clone()
-            };
-            let path_opt = if target_path.is_empty() {
-                None
-            } else {
-                Some(target_path.as_str())
-            };
-            match crate::fs::list_files(path_opt) {
-                Ok(entries) => {
-                    if entries.is_empty() {
-                        println!("(empty)");
-                    } else {
-                        for name in entries {
-                            println!("{}", name);
-                        }
-                    }
-                }
-                Err(err) => println!("fs error: {}", err),
-            }
-        }
-        "cd" => {
-            let path_arg = parts.next().unwrap_or("/");
-            let target = normalize_path(cwd.as_str(), path_arg);
-            let fs_path = if target.is_empty() {
-                ""
-            } else {
-                target.as_str()
-            };
-            match crate::fs::ensure_directory(fs_path) {
-                Ok(()) => {
-                    *cwd = target;
-                }
-                Err(err) => println!("fs error: {}", err),
-            }
-        }
         "mkdir" => {
             if let Some(path) = parts.next() {
                 let target = normalize_path(cwd.as_str(), path);
@@ -281,10 +327,8 @@ fn handle_fs_command(command: &str, cwd: &mut String) {
 
 fn print_fs_usage() {
     println!("fs commands:");
-    println!("  fs ls [path]");
     println!("  fs cat <path>");
     println!("  fs write <path> <text>");
-    println!("  fs cd <path>");
     println!("  fs rm <path>");
     println!("  fs mkdir <path>");
     println!("  fs format");
@@ -321,15 +365,24 @@ fn handle_run_command(command: &str, cwd: &str) {
             crate::process::dump(&program);
             println!("launching {}", path);
 
-            let mut args = Vec::new();
+            // Normalize all arguments relative to current working directory
+            // This ensures that paths like "test.txt" work correctly
+            let normalized_args: Vec<String> = extra_args
+                .iter()
+                .map(|&arg| normalize_path(cwd, arg))
+                .collect();
+
+            let mut args: Vec<&str> = Vec::new();
             args.push(path);
-            args.extend(extra_args.iter().copied());
+            for arg in &normalized_args {
+                args.push(arg.as_str());
+            }
 
             unsafe { crate::process::enter_user(&program, &args) };
         }
-        Err(crate::process::LoadError::Fs(err)) => println!("fs error: {}", err),
-        Err(crate::process::LoadError::Elf(err)) => println!("elf error: {:?}", err),
-        Err(crate::process::LoadError::OutOfMemory) => println!("loader error: out of memory"),
+        Err(LoadError::Fs(err)) => println!("fs error: {}", err),
+        Err(LoadError::Elf(err)) => println!("elf error: {:?}", err),
+        Err(LoadError::OutOfMemory) => println!("loader error: out of memory"),
     }
 }
 
@@ -337,7 +390,7 @@ fn print_prompt(cwd: &str) {
     if cwd.is_empty() {
         print!("/> ");
     } else {
-        print!("/{}/> ", cwd);
+        print!("{}/> ", cwd);
     }
 }
 
@@ -366,7 +419,11 @@ fn normalize_path(cwd: &str, input: &str) -> String {
         segments.push(String::from(part));
     }
 
-    segments.join("/")
+    if segments.is_empty() {
+        String::new()
+    } else {
+        alloc::format!("/{}", segments.join("/"))
+    }
 }
 
 fn install_embedded_bins() {
@@ -388,6 +445,15 @@ fn install_embedded_bins() {
         Ok(_) => {}
         Err(FsError::NotFound) => match fs::write_file("/bin/cat2", crate::embedded::CAT2_BIN) {
             Ok(_) => println!("installed /bin/cat2"),
+            Err(err) => println!("fs error: {}", err),
+        },
+        Err(err) => println!("fs error: {}", err),
+    }
+
+    match fs::read_file("/bin/wc") {
+        Ok(_) => {}
+        Err(FsError::NotFound) => match fs::write_file("/bin/wc", crate::embedded::WC_BIN) {
+            Ok(_) => println!("installed /bin/wc"),
             Err(err) => println!("fs error: {}", err),
         },
         Err(err) => println!("fs error: {}", err),
