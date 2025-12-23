@@ -1,8 +1,19 @@
 [package]
 name = "user_bin"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "cat"
+path = "src/bin/cat.rs"
+
+[[bin]]
+name = "wc"
+path = "src/bin/wc.rs"
 
 [dependencies]
 

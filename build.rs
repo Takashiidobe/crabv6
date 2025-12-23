@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=user_bin/src/bin/cat2.rs");
+    println!("cargo:rerun-if-changed=user_bin/src/lib.rs");
+    println!("cargo:rerun-if-changed=user_bin/src/bin/cat.rs");
     println!("cargo:rerun-if-changed=user_bin/src/bin/wc.rs");
     println!("cargo:rerun-if-changed=user_bin/Cargo.toml");
     println!("cargo:rerun-if-changed=user_bin/.cargo/config.toml");
@@ -13,7 +14,7 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let target = "riscv64gc-unknown-none-elf";
 
-    // Build all user binaries (cat2 and wc)
+    // Build all user binaries (cat and wc)
     let user_manifest = manifest_dir.join("user_bin/Cargo.toml");
     let status = Command::new(&cargo)
         .current_dir(&manifest_dir)
@@ -39,15 +40,15 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     fs::create_dir_all(&out_dir).expect("failed to create OUT_DIR");
 
-    // Copy cat2 binary
-    let cat2_binary = manifest_dir
+    // Copy cat binary
+    let cat_binary = manifest_dir
         .join("user_bin")
         .join("target")
         .join(target)
         .join("release")
-        .join("cat2");
-    let cat2_out = out_dir.join("cat2.bin");
-    fs::copy(&cat2_binary, &cat2_out).expect("failed to copy cat2 binary");
+        .join("cat");
+    let cat_out = out_dir.join("cat.bin");
+    fs::copy(&cat_binary, &cat_out).expect("failed to copy cat binary");
 
     // Copy wc binary
     let wc_binary = manifest_dir

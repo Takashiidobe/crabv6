@@ -12,11 +12,11 @@ System calls provide the mechanism for user programs to request services from th
 
 ### RISC-V ABI
 
-Syscalls follow the RISC-V calling convention:
+Syscalls follow a custom calling convention:
 
 **Registers**:
-- `a7` (x17): Syscall number
-- `a0-a6` (x10-x16): Arguments (up to 7 arguments)
+- `a0` (x10): Syscall number
+- `a1-a6` (x11-x16): Arguments (up to 6 arguments)
 - `a0` (x10): Return value (after `ecall` returns)
 
 **Example** (from user space):
@@ -25,9 +25,9 @@ let ret: isize;
 unsafe {
     asm!(
         "ecall",
-        in("a7") syscall_number,
-        in("a0") arg0,
-        in("a1") arg1,
+        in("a0") syscall_number,
+        in("a1") arg0,
+        in("a2") arg1,
         lateout("a0") ret,
     );
 }
@@ -63,10 +63,10 @@ pub const ENOTEMPTY: isize = -39; // Directory not empty
    - Identify trap as syscall (check `scause`)
 3. **Call dispatcher** (`src/kernel_entry.S:70-81`)
    ```asm
-   call syscall_handler  # Arguments already in a0-a7
+   call syscall_handler  # Arguments already in a0-a6
    ```
 4. **Dispatcher** (`src/syscall.rs:14-50`)
-   - Match on `a7` (syscall number)
+   - Match on `a0` (syscall number)
    - Call appropriate handler
    - Return result in `a0`
 5. **Return to user** (`src/kernel_entry.S:82-106`)
@@ -80,18 +80,18 @@ pub const ENOTEMPTY: isize = -39; // Directory not empty
 ```rust
 #[no_mangle]
 pub extern "C" fn syscall_handler(
-    a0: usize, a1: usize, a2: usize, a3: usize,
-    a4: usize, a5: usize, a6: usize, syscall_num: usize,
+    syscall_num: usize, a1: usize, a2: usize, a3: usize,
+    a4: usize, a5: usize, a6: usize,
 ) -> isize {
     match syscall_num {
-        SYS_WRITE => sys_write(a0, a1, a2),
-        SYS_EXIT => sys_exit(a0),
-        SYS_FILE_WRITE => sys_file_write(a0, a1, a2, a3),
-        SYS_FILE_READ => sys_file_read(a0, a1, a2, a3),
-        SYS_FILE_CREATE => sys_file_create(a0, a1),
-        SYS_FILE_DELETE => sys_file_delete(a0, a1),
-        SYS_DIR_CREATE => sys_dir_create(a0, a1),
-        SYS_DIR_DELETE => sys_dir_delete(a0, a1),
+        SYS_WRITE => sys_write(a1, a2, a3),
+        SYS_EXIT => sys_exit(a1),
+        SYS_FILE_WRITE => sys_file_write(a1, a2, a3, a4),
+        SYS_FILE_READ => sys_file_read(a1, a2, a3, a4),
+        SYS_FILE_CREATE => sys_file_create(a1, a2),
+        SYS_FILE_DELETE => sys_file_delete(a1, a2),
+        SYS_DIR_CREATE => sys_dir_create(a1, a2),
+        SYS_DIR_DELETE => sys_dir_delete(a1, a2),
         _ => EINVAL,  // Unknown syscall
     }
 }
@@ -138,10 +138,10 @@ fn write(fd: usize, buf: &[u8]) -> isize {
     unsafe {
         asm!(
             "ecall",
-            in("a7") 1,              // SYS_WRITE
-            in("a0") fd,
-            in("a1") buf.as_ptr(),
-            in("a2") buf.len(),
+            in("a0") 1,              // SYS_WRITE
+            in("a1") fd,
+            in("a2") buf.as_ptr(),
+            in("a3") buf.len(),
             lateout("a0") ret,
         );
     }
@@ -198,8 +198,8 @@ fn exit(code: isize) -> ! {
     unsafe {
         asm!(
             "ecall",
-            in("a7") 2,     // SYS_EXIT
-            in("a0") code,
+            in("a0") 2,     // SYS_EXIT
+            in("a1") code,
             options(noreturn)
         );
     }
@@ -259,11 +259,11 @@ fn write_file(path: &[u8], data: &[u8]) -> isize {
     unsafe {
         asm!(
             "ecall",
-            in("a7") 3,                 // SYS_FILE_WRITE
-            in("a0") path.as_ptr(),
-            in("a1") path.len(),
-            in("a2") data.as_ptr(),
-            in("a3") data.len(),
+            in("a0") 3,                 // SYS_FILE_WRITE
+            in("a1") path.as_ptr(),
+            in("a2") path.len(),
+            in("a3") data.as_ptr(),
+            in("a4") data.len(),
             lateout("a0") ret,
         );
     }
@@ -324,11 +324,11 @@ fn read_file(path: &[u8], buf: &mut [u8]) -> isize {
     unsafe {
         asm!(
             "ecall",
-            in("a7") 4,                 // SYS_FILE_READ
-            in("a0") path.as_ptr(),
-            in("a1") path.len(),
-            in("a2") buf.as_ptr(),
-            in("a3") buf.len(),
+            in("a0") 4,                 // SYS_FILE_READ
+            in("a1") path.as_ptr(),
+            in("a2") path.len(),
+            in("a3") buf.as_ptr(),
+            in("a4") buf.len(),
             lateout("a0") ret,
         );
     }
@@ -384,9 +384,9 @@ fn create_file(path: &[u8]) -> isize {
     unsafe {
         asm!(
             "ecall",
-            in("a7") 5,                 // SYS_FILE_CREATE
-            in("a0") path.as_ptr(),
-            in("a1") path.len(),
+            in("a0") 5,                 // SYS_FILE_CREATE
+            in("a1") path.as_ptr(),
+            in("a2") path.len(),
             lateout("a0") ret,
         );
     }
@@ -434,9 +434,9 @@ fn delete_file(path: &[u8]) -> isize {
     unsafe {
         asm!(
             "ecall",
-            in("a7") 6,                 // SYS_FILE_DELETE
-            in("a0") path.as_ptr(),
-            in("a1") path.len(),
+            in("a0") 6,                 // SYS_FILE_DELETE
+            in("a1") path.as_ptr(),
+            in("a2") path.len(),
             lateout("a0") ret,
         );
     }
@@ -486,9 +486,9 @@ fn create_dir(path: &[u8]) -> isize {
     unsafe {
         asm!(
             "ecall",
-            in("a7") 7,                 // SYS_DIR_CREATE
-            in("a0") path.as_ptr(),
-            in("a1") path.len(),
+            in("a0") 7,                 // SYS_DIR_CREATE
+            in("a1") path.as_ptr(),
+            in("a2") path.len(),
             lateout("a0") ret,
         );
     }
@@ -539,9 +539,9 @@ fn delete_dir(path: &[u8]) -> isize {
     unsafe {
         asm!(
             "ecall",
-            in("a7") 8,                 // SYS_DIR_DELETE
-            in("a0") path.as_ptr(),
-            in("a1") path.len(),
+            in("a0") 8,                 // SYS_DIR_DELETE
+            in("a1") path.as_ptr(),
+            in("a2") path.len(),
             lateout("a0") ret,
         );
     }
@@ -669,15 +669,15 @@ match syscall_num {
 ### 4. User-Space Wrapper
 
 ```rust
-// user_bin/src/main.rs
+// user_bin/src/lib.rs
 fn mynewcall(arg0: usize, arg1: usize) -> isize {
     let ret: isize;
     unsafe {
         asm!(
             "ecall",
-            in("a7") 9,        // SYS_MYNEWCALL
-            in("a0") arg0,
-            in("a1") arg1,
+            in("a0") 9,        // SYS_MYNEWCALL
+            in("a1") arg0,
+            in("a2") arg1,
             lateout("a0") ret,
         );
     }

@@ -196,7 +196,8 @@ fn process_command(command: &str, cwd: &mut String) {
                 match crate::fs::read_file(&bin_path) {
                     Ok(_) => {
                         // Binary exists, execute it with full path
-                        let rest_of_command: Vec<&str> = command.split_ascii_whitespace().skip(1).collect();
+                        let rest_of_command: Vec<&str> =
+                            command.split_ascii_whitespace().skip(1).collect();
                         let run_command = if rest_of_command.is_empty() {
                             alloc::format!("run {}", bin_path)
                         } else {
@@ -436,15 +437,15 @@ fn install_embedded_bins() {
         return;
     }
 
-    if let Err(err) = fs::write_file("cat2.txt", &[0, 0]) {
+    if let Err(err) = fs::write_file("test.txt", "hello world".as_bytes()) {
         println!("fs error: {}", err);
         return;
     }
 
-    match fs::read_file("/bin/cat2") {
+    match fs::read_file("/bin/cat") {
         Ok(_) => {}
-        Err(FsError::NotFound) => match fs::write_file("/bin/cat2", crate::embedded::CAT2_BIN) {
-            Ok(_) => println!("installed /bin/cat2"),
+        Err(FsError::NotFound) => match fs::write_file("/bin/cat", crate::embedded::CAT_BIN) {
+            Ok(_) => println!("installed /bin/cat"),
             Err(err) => println!("fs error: {}", err),
         },
         Err(err) => println!("fs error: {}", err),

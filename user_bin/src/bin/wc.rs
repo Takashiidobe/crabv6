@@ -1,27 +1,13 @@
 #![no_std]
 #![no_main]
 
-use core::panic::PanicInfo;
+use user_bin::{exit, get_arg, read_file, write};
 
-const SYS_WRITE: usize = 1;
-const SYS_EXIT: usize = 2;
-const SYS_FILE_READ: usize = 4;
-
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start(argc: usize, argv: *const *const u8) -> ! {
-    if argc < 2 {
+    let Some(filename) = get_arg(argc, argv, 1) else {
         write(1, b"Usage: wc <file>\n");
         exit(1);
-    }
-
-    let filename = unsafe {
-        let args = core::slice::from_raw_parts(argv, argc);
-        let ptr = args[1];
-        let mut len = 0;
-        while *ptr.add(len) != 0 {
-            len += 1;
-        }
-        core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr, len))
     };
 
     let mut buf = [0u8; 4096];
@@ -100,51 +86,4 @@ fn print_number(mut num: usize) {
         i -= 1;
         write(1, &buf[i..i+1]);
     }
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    exit(2)
-}
-
-fn write(fd: usize, buf: &[u8]) -> isize {
-    let mut ret: isize;
-    unsafe {
-        core::arch::asm!(
-            "ecall",
-            in("a0") SYS_WRITE,
-            in("a1") fd,
-            in("a2") buf.as_ptr(),
-            in("a3") buf.len(),
-            lateout("a0") ret,
-        );
-    }
-    ret
-}
-
-fn exit(code: isize) -> ! {
-    unsafe {
-        core::arch::asm!(
-            "ecall",
-            in("a0") SYS_EXIT,
-            in("a1") code as usize,
-            options(noreturn)
-        );
-    }
-}
-
-fn read_file(path: &str, buf: &mut [u8]) -> isize {
-    let mut ret: isize;
-    unsafe {
-        core::arch::asm!(
-            "ecall",
-            in("a0") SYS_FILE_READ,
-            in("a1") path.as_ptr(),
-            in("a2") path.len(),
-            in("a3") buf.as_mut_ptr(),
-            in("a4") buf.len(),
-            lateout("a0") ret,
-        );
-    }
-    ret
 }

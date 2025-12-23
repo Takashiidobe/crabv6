@@ -98,7 +98,7 @@ pub fn dump(program: &LoadedProgram) {
     }
 }
 
-pub unsafe fn enter_user(program: &LoadedProgram, args: &[&str]) -> isize {
+pub unsafe fn enter_user(program: &LoadedProgram, args: &[&str]) -> isize { unsafe {
     // Copy program segments
     for seg in &program.segments {
         unsafe {
@@ -164,13 +164,13 @@ pub unsafe fn enter_user(program: &LoadedProgram, args: &[&str]) -> isize {
     let entry = program.entry as usize;
 
     unsafe { enter_user_trampoline(entry, sp, argc, argv_ptr) }
-}
+}}
 
 pub unsafe fn prepare_for_kernel_return(trap_frame: *mut TrapFrame, code: isize) {
     unsafe {
         (*trap_frame).ra = KERNEL_RETURN_ADDRESS;
         sstatus::set_spp(SPP::Supervisor);
-        riscv::register::sepc::write(kernel_resume_from_user as usize);
+        riscv::register::sepc::write(kernel_resume_from_user as *const () as usize);
         // Propagate exit code back to the caller through a0 when we return to kernel mode
         (*trap_frame).a0 = code as usize;
     }
