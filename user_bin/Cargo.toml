@@ -15,6 +15,10 @@ path = "src/bin/cat.rs"
 name = "wc"
 path = "src/bin/wc.rs"
 
+[[bin]]
+name = "sh"
+path = "src/bin/sh.rs"
+
 [dependencies]
 
 [profile.dev]

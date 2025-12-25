@@ -7,6 +7,7 @@ fn main() {
     println!("cargo:rerun-if-changed=user_bin/src/lib.rs");
     println!("cargo:rerun-if-changed=user_bin/src/bin/cat.rs");
     println!("cargo:rerun-if-changed=user_bin/src/bin/wc.rs");
+    println!("cargo:rerun-if-changed=user_bin/src/bin/sh.rs");
     println!("cargo:rerun-if-changed=user_bin/Cargo.toml");
     println!("cargo:rerun-if-changed=user_bin/.cargo/config.toml");
 
@@ -14,7 +15,7 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let target = "riscv64gc-unknown-none-elf";
 
-    // Build all user binaries (cat and wc)
+    // Build all user binaries (cat, wc, sh)
     let user_manifest = manifest_dir.join("user_bin/Cargo.toml");
     let status = Command::new(&cargo)
         .current_dir(&manifest_dir)
@@ -59,4 +60,14 @@ fn main() {
         .join("wc");
     let wc_out = out_dir.join("wc.bin");
     fs::copy(&wc_binary, &wc_out).expect("failed to copy wc binary");
+
+    // Copy sh binary
+    let sh_binary = manifest_dir
+        .join("user_bin")
+        .join("target")
+        .join(target)
+        .join("release")
+        .join("sh");
+    let sh_out = out_dir.join("sh.bin");
+    fs::copy(&sh_binary, &sh_out).expect("failed to copy sh binary");
 }

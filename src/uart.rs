@@ -59,6 +59,20 @@ pub fn read_byte_nonblocking() -> Option<u8> {
     RX_QUEUE.lock().pop_front()
 }
 
+/// Blocking read that also polls the hardware in case interrupts are not delivered.
+pub fn read_byte_blocking() -> u8 {
+    loop {
+        if let Some(b) = read_byte_nonblocking() {
+            return b;
+        }
+        // Fallback to polling the UART data-ready bit.
+        if read_reg(REG_LSR) & LSR_DATA_READY != 0 {
+            return read_reg(REG_RBR);
+        }
+        core::hint::spin_loop();
+    }
+}
+
 pub fn has_pending_byte() -> bool {
     !RX_QUEUE.lock().is_empty()
 }

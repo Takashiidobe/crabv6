@@ -9,11 +9,13 @@ use crate::{elf::ElfFile, fs, uart};
 const USER_IMAGE_BASE: u64 = 0x8040_0000;
 const USER_IMAGE_LIMIT: u64 = USER_IMAGE_BASE + 0x0002_0000; // 128 KiB window
 const USER_STACK_SIZE: usize = 8 * 1024;
+pub const USER_WINDOW_SIZE: usize = (USER_IMAGE_LIMIT - USER_IMAGE_BASE) as usize;
 
 #[unsafe(no_mangle)]
 static mut KERNEL_STACK_POINTER: usize = 0;
 #[unsafe(no_mangle)]
 static mut KERNEL_RETURN_ADDRESS: usize = 0;
+static mut USER_SNAPSHOT: [u8; USER_WINDOW_SIZE] = [0; USER_WINDOW_SIZE];
 
 unsafe extern "C" {
     fn enter_user_trampoline(entry: usize, stack_top: usize, argc: usize, argv: usize) -> isize;
@@ -98,73 +100,137 @@ pub fn dump(program: &LoadedProgram) {
     }
 }
 
-pub unsafe fn enter_user(program: &LoadedProgram, args: &[&str]) -> isize { unsafe {
-    // Copy program segments
+/// Load program segments directly into the user window.
+pub fn load_into_user_window(program: &LoadedProgram) -> Result<(), LoadError> {
     for seg in &program.segments {
+        let dest = seg.dest as usize;
+        let offset = dest.saturating_sub(USER_IMAGE_BASE as usize);
+        let end = offset + seg.data.len();
+        if end > USER_WINDOW_SIZE {
+            return Err(LoadError::OutOfMemory);
+        }
         unsafe {
-            ptr::copy_nonoverlapping(seg.data.as_ptr(), seg.dest, seg.data.len());
+            ptr::copy_nonoverlapping(
+                seg.data.as_ptr(),
+                (USER_IMAGE_BASE as usize + offset) as *mut u8,
+                seg.data.len(),
+            );
         }
     }
+    Ok(())
+}
 
-    // Clear user stack
-    let stack_base = (program.stack_top - USER_STACK_SIZE as u64) as *mut u8;
-    unsafe {
-        ptr::write_bytes(stack_base, 0, USER_STACK_SIZE);
-    }
-
-    // Stack grows downward
-    let mut sp = program.stack_top as usize;
+/// Build the user stack in place inside the user window.
+pub fn build_user_stack(args: &[&str]) -> Result<(usize, usize, usize), LoadError> {
+    let mut sp = USER_IMAGE_LIMIT as usize;
     let argc = args.len();
-    debug_assert!(
-        argc <= 16,
-        "too many arguments passed to user program (max 16 supported)"
-    );
-    let mut arg_ptrs: [usize; 16] = [0; 16]; // support up to 16 args
+    debug_assert!(argc <= 16, "too many arguments (max 16)");
+    let mut arg_ptrs: [usize; 16] = [0; 16];
 
-    // Copy arguments into stack (in reverse order)
+    uart::write_str(&format!("[build_user_stack] argc={}\n", argc));
+
     for (index, &arg) in args.iter().enumerate().rev() {
         let bytes = arg.as_bytes();
-        sp -= bytes.len() + 1;
-        copy_to_user(sp as *mut u8, bytes.as_ptr(), bytes.len());
-        write_byte_to_user((sp + bytes.len()) as *mut u8, 0);
+        sp = sp.saturating_sub(bytes.len() + 1);
+        if sp < USER_IMAGE_BASE as usize {
+            return Err(LoadError::OutOfMemory);
+        }
+        unsafe {
+            copy_to_user(sp as *mut u8, bytes.as_ptr(), bytes.len());
+            write_byte_to_user((sp + bytes.len()) as *mut u8, 0);
+        }
         arg_ptrs[index] = sp;
+        uart::write_str(&format!("[build_user_stack] arg[{}]='{}' at 0x{:x}\n", index, arg, sp));
     }
 
-    // Align stack pointer to 16 bytes before pushing pointer-sized values.
     sp &= !(core::mem::size_of::<usize>() * 2 - 1);
 
-    // Ensure the total number of pointer-sized pushes keeps the stack aligned.
-    let pointer_pushes = argc + 2; // argv entries + NULL + argc
+    let pointer_pushes = argc + 2;
     if pointer_pushes & 1 != 0 {
-        sp -= core::mem::size_of::<usize>();
-        write_usize_to_user(sp as *mut usize, 0); // padding
+        sp = sp.saturating_sub(core::mem::size_of::<usize>());
+        unsafe { write_usize_to_user(sp as *mut usize, 0) };
     }
 
-    // Push NULL terminator
-    sp -= core::mem::size_of::<usize>();
-    write_usize_to_user(sp as *mut usize, 0);
+    sp = sp.saturating_sub(core::mem::size_of::<usize>());
+    unsafe { write_usize_to_user(sp as *mut usize, 0) };
 
-    // Push argv pointers (reverse back to original order)
-    for &ptr in arg_ptrs[..argc].iter().rev() {
-        sp -= core::mem::size_of::<usize>();
-        write_usize_to_user(sp as *mut usize, ptr);
+    uart::write_str(&format!("[build_user_stack] writing argv array at sp=0x{:x}\n", sp));
+    for (i, &ptr) in arg_ptrs[..argc].iter().rev().enumerate() {
+        sp = sp.saturating_sub(core::mem::size_of::<usize>());
+        unsafe { write_usize_to_user(sp as *mut usize, ptr) };
+        uart::write_str(&format!("[build_user_stack] argv[{}]=0x{:x} written at sp=0x{:x}\n", argc - 1 - i, ptr, sp));
     }
     let argv_ptr = sp;
 
-    // Push argc
-    sp -= core::mem::size_of::<usize>();
-    write_usize_to_user(sp as *mut usize, argc);
+    sp = sp.saturating_sub(core::mem::size_of::<usize>());
+    unsafe { write_usize_to_user(sp as *mut usize, argc) };
 
-    // Prepare to enter user mode
+    uart::write_str(&format!("[build_user_stack] returning sp=0x{:x}, argc={}, argv_ptr=0x{:x}\n", sp, argc, argv_ptr));
+
+    Ok((sp, argc, argv_ptr))
+}
+
+/// Compatibility helper: load a program and enter user mode immediately.
+pub unsafe fn enter_user(program: &LoadedProgram, args: &[&str]) -> isize {
+    load_into_user_window(program).expect("load_into_user_window failed");
+    let (sp, argc, argv_ptr) = build_user_stack(args).expect("build_user_stack failed");
+    unsafe { enter_user_at(program.entry as usize, sp, argc, argv_ptr) }
+}
+
+/// Enter user mode using a pre-built memory image already loaded into the user window.
+pub unsafe fn enter_user_at(entry: usize, sp: usize, argc: usize, argv_ptr: usize) -> isize {
     unsafe {
         sstatus::set_spp(SPP::User);
         sstatus::set_spie();
     }
-
-    let entry = program.entry as usize;
-
     unsafe { enter_user_trampoline(entry, sp, argc, argv_ptr) }
-}}
+}
+
+/// Copy the live user window into the provided buffer.
+pub fn snapshot_user_window(buf: &mut [u8]) {
+    unsafe {
+        ptr::copy_nonoverlapping(
+            USER_IMAGE_BASE as *const u8,
+            buf.as_mut_ptr(),
+            USER_WINDOW_SIZE,
+        );
+    }
+}
+
+/// Restore the user window from a buffer.
+pub fn restore_user_window(buf: &[u8]) {
+    unsafe {
+        ptr::copy_nonoverlapping(
+            buf.as_ptr(),
+            USER_IMAGE_BASE as *mut u8,
+            USER_WINDOW_SIZE,
+        );
+    }
+}
+
+/// Snapshot the user window into a static buffer.
+pub fn snapshot_user_window_static() {
+    unsafe {
+        let dst = core::ptr::addr_of_mut!(USER_SNAPSHOT) as *mut u8;
+        ptr::copy_nonoverlapping(
+            USER_IMAGE_BASE as *const u8,
+            dst,
+            USER_WINDOW_SIZE,
+        );
+    }
+}
+
+/// Restore the user window from the static buffer.
+pub fn restore_user_window_static() {
+    unsafe {
+        let src = core::ptr::addr_of!(USER_SNAPSHOT) as *const u8;
+        ptr::copy_nonoverlapping(
+            src,
+            USER_IMAGE_BASE as *mut u8,
+            USER_WINDOW_SIZE,
+        );
+    }
+}
 
 pub unsafe fn prepare_for_kernel_return(trap_frame: *mut TrapFrame, code: isize) {
     unsafe {

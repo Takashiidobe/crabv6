@@ -3,7 +3,9 @@ use linked_list_allocator::LockedHeap;
 #[global_allocator]
 static mut KERNEL_HEAP_ALLOCATOR: LockedHeap = LockedHeap::empty();
 
-static mut KERNEL_HEAP: [u8; 0x20000] = [0; 0x20000];
+// Increased heap size to 2MB for multitasking support
+// Each process needs 128KB memory snapshot, plus overhead for process structs, pipes, etc.
+static mut KERNEL_HEAP: [u8; 0x200000] = [0; 0x200000];
 
 /// Initialize the heap allocator.
 #[allow(static_mut_refs)]

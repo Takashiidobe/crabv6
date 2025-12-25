@@ -1,40 +1,105 @@
 #![no_std]
 #![no_main]
 
-use user_bin::{exit, get_arg, read_file, write};
+use user_bin::{close, exit, get_arg, open, read, write, O_READ};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(argc: usize, argv: *const *const u8) -> ! {
-    let Some(filename) = get_arg(argc, argv, 1) else {
-        write(1, b"Usage: wc <file>\n");
-        exit(1);
-    };
-
-    let mut buf = [0u8; 4096];
-    let len = read_file(filename, &mut buf);
-    if len < 0 {
-        write(1, b"wc: error reading file\n");
-        exit(1);
+    // If no arguments, read from stdin
+    if argc == 1 {
+        wc_fd(0, None);
+        exit(0);
     }
 
-    let data = &buf[..len as usize];
+    // Otherwise, wc each file argument
+    let mut total_lines = 0;
+    let mut total_words = 0;
+    let mut total_bytes = 0;
+    let mut file_count = 0;
 
-    // Count lines, words, and bytes
-    let lines = count_lines(data);
-    let words = count_words(data);
-    let bytes = len as usize;
+    let mut i = 1;
+    while i < argc {
+        let Some(filename) = get_arg(argc, argv, i) else {
+            break;
+        };
 
-    // Format and print output
+        let fd = open(filename, O_READ);
+        if fd < 0 {
+            write(2, b"wc: cannot open ");
+            write(2, filename.as_bytes());
+            write(2, b"\n");
+            exit(1);
+        }
+
+        let (lines, words, bytes) = wc_fd(fd as usize, Some(filename));
+        close(fd as usize);
+
+        total_lines += lines;
+        total_words += words;
+        total_bytes += bytes;
+        file_count += 1;
+        i += 1;
+    }
+
+    // If multiple files, print totals
+    if file_count > 1 {
+        print_number(total_lines);
+        write(1, b" ");
+        print_number(total_words);
+        write(1, b" ");
+        print_number(total_bytes);
+        write(1, b" total\n");
+    }
+
+    exit(0)
+}
+
+fn wc_fd(fd: usize, filename: Option<&str>) -> (usize, usize, usize) {
+    let mut buf = [0u8; 4096];
+    let mut total_bytes = 0;
+    let mut lines = 0;
+    let mut words = 0;
+    let mut in_word = false;
+
+    loop {
+        let len = read(fd, &mut buf);
+        if len <= 0 {
+            break;
+        }
+
+        let data = &buf[..len as usize];
+        total_bytes += data.len();
+
+        // Count lines and words
+        for &byte in data {
+            if byte == b'\n' {
+                lines += 1;
+            }
+
+            let is_whitespace = byte == b' ' || byte == b'\t' || byte == b'\n' || byte == b'\r';
+            if !is_whitespace && !in_word {
+                words += 1;
+                in_word = true;
+            } else if is_whitespace {
+                in_word = false;
+            }
+        }
+    }
+
+    // Print results
     print_number(lines);
     write(1, b" ");
     print_number(words);
     write(1, b" ");
-    print_number(bytes);
-    write(1, b" ");
-    write(1, filename.as_bytes());
+    print_number(total_bytes);
+
+    if let Some(name) = filename {
+        write(1, b" ");
+        write(1, name.as_bytes());
+    }
     write(1, b"\n");
 
-    exit(0)
+    (lines, words, total_bytes)
 }
 
 fn count_lines(data: &[u8]) -> usize {

@@ -8,17 +8,23 @@ extern crate alloc;
 use core::arch::asm;
 
 use crate::process::LoadError;
-use alloc::{string::String, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 use riscv_rt::entry;
 mod panic_handler;
 mod utils;
 
 mod elf;
 mod embedded;
+mod fd;
 mod fs;
 mod heap;
 mod interrupts;
+mod proc;
 mod process;
+mod scheduler;
 mod syscall;
 mod uart;
 mod user;
@@ -30,46 +36,6 @@ pub const ENTER: u8 = 13;
 pub const BACKSPACE: u8 = 127;
 pub const CTRL_C: u8 = 3;
 pub const CTRL_L: u8 = 12;
-
-pub fn shell() -> ! {
-    let mut cwd = String::new();
-    print_prompt(&cwd);
-    let mut command = String::new();
-
-    loop {
-        match crate::uart::read_byte_nonblocking() {
-            Some(ENTER) => {
-                println!();
-                process_command(&command, &mut cwd);
-                command.clear();
-                print_prompt(&cwd);
-            }
-            Some(BACKSPACE) => {
-                if !command.is_empty() {
-                    command.pop();
-                    // move left
-                    print!("\x08");
-                    // clear last character
-                    print!(" ");
-                    // move cursor back one
-                    print!("\x1b[1D");
-                }
-            }
-            Some(CTRL_C) => {
-                process_command("exit", &mut cwd);
-            }
-            Some(CTRL_L) => {
-                process_command("clear", &mut cwd);
-            }
-            Some(byte) => {
-                let ch = byte as char;
-                command.push(ch);
-                print!("{}", ch);
-            }
-            None => crate::interrupts::wait_for_event(),
-        }
-    }
-}
 
 fn clear_screen() {
     print!("\x1b[2J\x1b[1;1H");
@@ -182,6 +148,12 @@ fn process_command(command: &str, cwd: &mut String) {
         }
         "" => {}
         _ => {
+            // Defer complex shell features to user-space /bin/sh
+            if command.contains(['|', '>', '<']) {
+                println!("Pipes/redirection are handled in /bin/sh. Launch the user shell to run: {command}");
+                return;
+            }
+
             // Try to execute as a binary in /bin/
             let first_word = command.split_ascii_whitespace().next().unwrap_or("");
             if !first_word.is_empty() {
@@ -387,6 +359,144 @@ fn handle_run_command(command: &str, cwd: &str) {
     }
 }
 
+fn handle_pipe(_command: &str, _cwd: &str) {}
+
+fn handle_output_redirect(command: &str, cwd: &str) {
+    let Some(redir_pos) = command.find('>') else {
+        return;
+    };
+
+    let cmd_part = command[..redir_pos].trim();
+    let file_part = command[redir_pos + 1..].trim();
+
+    // Check for append mode (>>)
+    let (file_path, mode) = if file_part.starts_with('>') {
+        let file = file_part[1..].trim();
+        (normalize_path(cwd, file), crate::fd::FileMode {
+            read: false,
+            write: true,
+            create: true,
+            append: true,
+        })
+    } else {
+        (normalize_path(cwd, file_part), crate::fd::FileMode {
+            read: false,
+            write: true,
+            create: true,
+            append: false,
+        })
+    };
+
+    // Open output file
+    let file_fd = match crate::fd::FileFd::open(file_path.clone(), mode) {
+        Ok(file_fd) => file_fd,
+        Err(err) => {
+            println!("Failed to open {} for writing: {:?}", file_path, err);
+            return;
+        }
+    };
+
+    let fd = match crate::fd::FD_TABLE.lock().alloc(crate::fd::FileDescriptor::File(file_fd)) {
+        Ok(fd) => fd,
+        Err(err) => {
+            println!("Failed to allocate fd: {:?}", err);
+            return;
+        }
+    };
+
+    // Save stdout
+    let saved_stdout = match crate::fd::FD_TABLE.lock().dup2(1, 10) {
+        Ok(_) => 10,
+        Err(err) => {
+            println!("Failed to save stdout: {:?}", err);
+            let _ = crate::fd::FD_TABLE.lock().close(fd);
+            return;
+        }
+    };
+
+    // Redirect stdout to file
+    let _ = crate::fd::FD_TABLE.lock().dup2(fd, 1);
+    let _ = crate::fd::FD_TABLE.lock().close(fd);
+
+    // Execute command
+    execute_simple_command(cmd_part, cwd);
+
+    // Restore stdout
+    let _ = crate::fd::FD_TABLE.lock().dup2(saved_stdout, 1);
+    let _ = crate::fd::FD_TABLE.lock().close(saved_stdout);
+}
+
+fn handle_input_redirect(command: &str, cwd: &str) {
+    let Some(redir_pos) = command.find('<') else {
+        return;
+    };
+
+    let cmd_part = command[..redir_pos].trim();
+    let file_part = command[redir_pos + 1..].trim();
+    let file_path = normalize_path(cwd, file_part);
+
+    // Open input file
+    let mode = crate::fd::FileMode {
+        read: true,
+        write: false,
+        create: false,
+        append: false,
+    };
+
+    let file_fd = match crate::fd::FileFd::open(file_path.clone(), mode) {
+        Ok(file_fd) => file_fd,
+        Err(err) => {
+            println!("Failed to open {} for reading: {:?}", file_path, err);
+            return;
+        }
+    };
+
+    let fd = match crate::fd::FD_TABLE.lock().alloc(crate::fd::FileDescriptor::File(file_fd)) {
+        Ok(fd) => fd,
+        Err(err) => {
+            println!("Failed to allocate fd: {:?}", err);
+            return;
+        }
+    };
+
+    // Save stdin
+    let saved_stdin = match crate::fd::FD_TABLE.lock().dup2(0, 10) {
+        Ok(_) => 10,
+        Err(err) => {
+            println!("Failed to save stdin: {:?}", err);
+            let _ = crate::fd::FD_TABLE.lock().close(fd);
+            return;
+        }
+    };
+
+    // Redirect stdin from file
+    let _ = crate::fd::FD_TABLE.lock().dup2(fd, 0);
+    let _ = crate::fd::FD_TABLE.lock().close(fd);
+
+    // Execute command
+    execute_simple_command(cmd_part, cwd);
+
+    // Restore stdin
+    let _ = crate::fd::FD_TABLE.lock().dup2(saved_stdin, 0);
+    let _ = crate::fd::FD_TABLE.lock().close(saved_stdin);
+}
+
+fn execute_simple_command(command: &str, cwd: &str) {
+    let first_word = command.split_ascii_whitespace().next().unwrap_or("");
+    if first_word.is_empty() {
+        return;
+    }
+
+    let bin_path = alloc::format!("/bin/{}", first_word);
+    let rest_of_command: Vec<&str> = command.split_ascii_whitespace().skip(1).collect();
+    let run_command = if rest_of_command.is_empty() {
+        alloc::format!("run {}", bin_path)
+    } else {
+        alloc::format!("run {} {}", bin_path, rest_of_command.join(" "))
+    };
+    handle_run_command(&run_command, cwd);
+}
+
 fn print_prompt(cwd: &str) {
     if cwd.is_empty() {
         print!("/> ");
@@ -451,6 +561,15 @@ fn install_embedded_bins() {
         Err(err) => println!("fs error: {}", err),
     }
 
+    match fs::read_file("/bin/sh") {
+        Ok(_) => {}
+        Err(FsError::NotFound) => match fs::write_file("/bin/sh", crate::embedded::SH_BIN) {
+            Ok(_) => println!("installed /bin/sh"),
+            Err(err) => println!("fs error: {}", err),
+        },
+        Err(err) => println!("fs error: {}", err),
+    }
+
     match fs::read_file("/bin/wc") {
         Ok(_) => {}
         Err(FsError::NotFound) => match fs::write_file("/bin/wc", crate::embedded::WC_BIN) {
@@ -459,6 +578,88 @@ fn install_embedded_bins() {
         },
         Err(err) => println!("fs error: {}", err),
     }
+}
+
+fn launch_user_shell() -> ! {
+    let sh_path = "/bin/sh";
+    let args = [sh_path];
+
+    let program = match crate::process::load(sh_path) {
+        Ok(p) => p,
+        Err(_) => {
+            println!("failed to load /bin/sh");
+            return idle_loop();
+        }
+    };
+
+    // Load shell into user window and build its stack
+    if let Err(_) = crate::process::load_into_user_window(&program) {
+        println!("failed to load shell image");
+        return idle_loop();
+    }
+    let (sp, _argc, _argv_ptr) = match crate::process::build_user_stack(&args) {
+        Ok(v) => v,
+        Err(_) => {
+            println!("failed to build shell stack");
+            return idle_loop();
+        }
+    };
+
+    let (sp, shell_argc, shell_argv_ptr) = match crate::process::build_user_stack(&args) {
+        Ok(v) => v,
+        Err(_) => {
+            println!("failed to build shell stack");
+            return idle_loop();
+        }
+    };
+
+    // Capture shell's initial memory state
+    let mut shell_memory = alloc::vec![0u8; crate::process::USER_WINDOW_SIZE];
+    crate::process::snapshot_user_window(&mut shell_memory);
+
+    // Create shell process with its memory snapshot
+    {
+        let mut table = crate::proc::PROCESS_TABLE.lock();
+        let pid = match table.spawn(
+            program.entry,
+            sp as u64,
+            sh_path.to_string(),
+            args.iter().map(|s| s.to_string()).collect(),
+            fd::FdTable::with_standard(),
+            shell_memory,
+            shell_argc,
+            shell_argv_ptr,
+        ) {
+            Ok(pid) => pid,
+            Err(_) => {
+                println!("failed to spawn shell");
+                return idle_loop();
+            }
+        };
+        // Don't set as current yet - scheduler will handle it
+    }
+
+    println!("Shell process created, starting execution...");
+
+    // Restore shell's memory and enter it
+    // After this, all scheduling happens via trap handlers
+    let (entry, sp) = {
+        let mut table = crate::proc::PROCESS_TABLE.lock();
+        let shell_pid = table.get_all_processes().first().expect("no shell process").pid;
+        table.set_current(shell_pid);
+        table.restore_process_memory(shell_pid);
+
+        let process = table.get(shell_pid).expect("shell process vanished");
+        (process.pc, process.sp)
+    };
+
+    // Enter user mode for shell
+    // Scheduling happens via syscall trap handlers calling Scheduler::maybe_switch
+    // This never returns in normal operation
+    unsafe { crate::process::enter_user_at(entry, sp, 0, 0) };
+
+    println!("All processes exited");
+    idle_loop()
 }
 
 #[entry]
@@ -481,7 +682,7 @@ fn main(a0: usize) -> ! {
         Err(err) => println!("failed to initialize filesystem: {}", err),
     }
 
-    shell()
+    launch_user_shell()
 }
 
 fn idle_loop() -> ! {
